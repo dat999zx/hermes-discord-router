@@ -1,45 +1,29 @@
-# Hermes Discord Router Configuration
-# Copy this to config.yaml and fill in your values
+# Channel -> project routing for Hermes
+#
+# This block goes in YOUR HERMES config.yaml (not in this repo), at the top
+# level. `install.py` prints it filled in with your channels.
+#
+# Hermes home config.yaml is at:
+#   Windows: %LOCALAPPDATA%\hermes\config.yaml
+#   macOS/Linux: ~/.hermes/config.yaml
 
 discord:
-  # Your Discord bot token (from Discord Developer Portal)
-  token: "YOUR_BOT_TOKEN_HERE"
+  channels:
+    # `folder:` (recommended) is an absolute path, used as-is.
+    - id: '1234567890123456789'
+      folder: C:/Users/YOU
 
-# Channel to project mappings
-# Get channel IDs: Discord Developer Mode → Right-click channel → Copy ID
-channels:
-  - id: "1234567890123456789"
-    project: "my-project"
-    folder: "D:/projects/my-project"  # Optional: defaults to ~/projects/<project>
-    
-  - id: "9876543210987654321"
-    project: "another-project"
-    # folder not specified = uses default path
+    - id: '9876543210987654321'
+      folder: D:/code/myproject
 
-# Hermes configuration
-hermes:
-  # Path to Hermes CLI executable
-  # Leave as "hermes" if globally installed
-  # For dev builds: "C:/Users/Admin/AppData/Local/hermes/knowl-dev.cmd"
-  cli: "hermes"
-  
-  # Default projects root (used when folder not specified)
-  # Channels without explicit folder use: {projects_root}/{project_name}
-  projects_root: "~/projects"
-  
-  # Timeout for Hermes responses (seconds)
-  timeout: 300
+    # `project:` is a project NAME looked up in Hermes's projects.db. If that
+    # database is empty the lookup fails and the channel is not routed, so
+    # prefer `folder:` unless your projects are registered there.
+    # - id: '1111111111111111111'
+    #   project: myproject
 
-# Bot behavior
-behavior:
-  # React with 📚 when routing to Knowl
-  react_on_route: true
-  
-  # Create threads for responses (keeps channels clean)
-  use_threads: false
-  
-  # Require @mention to respond (vs respond to all messages)
-  require_mention: false
-  
-  # Ignore messages from other bots
-  ignore_bots: true
+# Get a channel ID: Discord Settings -> Advanced -> Developer Mode, then
+# right-click the channel -> Copy Channel ID.
+#
+# The bot token is NOT set here -- it comes from DISCORD_BOT_TOKEN in your
+# Hermes .env, the same one the Discord platform already uses.

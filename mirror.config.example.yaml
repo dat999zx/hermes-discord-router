@@ -1,24 +1,29 @@
 # Hermes Desktop -> Discord mirror config
 #
-# Mirrors Hermes DESKTOP prompts/replies into a per-session Discord thread in
-# the mapped channel. Pairs with the gateway's Discord<->Hermes routing so
-# Discord becomes a full second view of your projects.
+# Copy to mirror.config.yaml (gitignored) and edit. `install.py` writes this
+# file for you; edit it directly to change mappings afterwards.
 #
-# bot_token: leave as ${DISCORD_BOT_TOKEN} to read the env var, or omit to
-# auto-read hermes's own .env (LOCALAPPDATA/hermes/.env). A literal token works
-# too but keep this file out of git (see .gitignore).
+# bot_token: leave as ${DISCORD_BOT_TOKEN} to read the env var, or omit the key
+# entirely to auto-read Hermes's own .env. A literal token works but keep this
+# file out of git.
 bot_token: ${DISCORD_BOT_TOKEN}
 
-# hermes_home: where state.db / projects.db / .env live. Omit to use
-# %LOCALAPPDATA%/hermes.
+# Where state.db / projects.db / .env live.
+#   Windows: C:/Users/YOU/AppData/Local/hermes
+#   macOS/Linux: /home/you/.hermes
 hermes_home: C:/Users/YOU/AppData/Local/hermes
 
+# How often to check for new Desktop turns.
 poll_seconds: 2.0
 
-# Map each Discord channel to a project. Use `project:` (looked up in
-# projects.db, same as the desktop sidebar) OR an explicit `cwd:`.
+# Map each Discord channel to a project folder.
+#
+# `cwd:` must match the session's working directory EXACTLY, which is the same
+# path you use for `folder:` in Hermes's config.yaml. Check a live session with:
+#   sqlite3 state.db "SELECT cwd FROM sessions ORDER BY started_at DESC LIMIT 3"
 channels:
-  - id: '1545381328462024806'   # #home
-    project: Home
-  - id: '1545385614797709322'   # #knowl
-    project: knowl
+  - id: '1234567890123456789'
+    cwd: C:/Users/YOU
+
+  - id: '9876543210987654321'
+    cwd: D:/code/myproject

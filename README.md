@@ -145,7 +145,6 @@ that isn't a real project; Hermes auto-creates a project from any cwd. Fix the
 | `discord_router.py` | Channel → folder resolution (copied into Hermes home) |
 | `desktop_mirror.py` | Desktop → Discord mirror service |
 | `desktop_supervisor.py` | Starts/stops services with Hermes Desktop |
-| `router.py` | Standalone bot (superseded; kept for reference) |
 
 ## License
 
