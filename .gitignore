@@ -24,3 +24,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# desktop mirror local state / secrets
+mirror.config.yaml
+desktop_mirror_threads.json
+desktop_mirror_cursor.json
