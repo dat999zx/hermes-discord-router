@@ -41,6 +41,7 @@ VENV_PY = HERMES_HOME / "hermes-agent" / "venv" / "Scripts" / "python.exe"
 MIRROR_PY = REPO_DIR / "desktop_mirror.py"
 
 DESKTOP_PROCESS_NAMES = {"hermes.exe"}
+IS_WINDOWS = os.name == "nt"
 
 POLL_SECONDS = 3.0
 STOP_GRACE_POLLS = 3          # ~9s of "desktop gone" before stopping services
@@ -126,6 +127,40 @@ def _hermes_env() -> dict:
 CREATE_NO_WINDOW = 0x08000000
 
 
+def _hermes_startup_entry() -> Optional[Path]:
+    """Path of Hermes's OWN autostart entry, if this platform has one."""
+    if not IS_WINDOWS:
+        return None
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return None
+    return (Path(appdata) / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs" / "Startup" / "Hermes_Gateway.vbs")
+
+
+def suppress_hermes_autostart() -> None:
+    """Remove Hermes's own login autostart entry.
+
+    `hermes gateway start` re-registers `Hermes_Gateway.vbs` in the Startup
+    folder every time it runs (hermes_cli/gateway_windows.py install()), so
+    deleting it once is not enough -- this supervisor starts the gateway, which
+    puts the entry straight back. Left alone, the gateway would then ALSO start
+    at login, defeating the point of tying it to the desktop app.
+
+    We re-remove it after every start. Hermes only uses the entry for login
+    autostart; deleting it does not affect the running gateway.
+    """
+    entry = _hermes_startup_entry()
+    if entry is None:
+        return
+    try:
+        if entry.exists():
+            entry.unlink()
+            log.info("removed Hermes's own autostart entry (%s)", entry.name)
+    except Exception as e:
+        log.debug("could not remove %s: %s", entry, e)
+
+
 def start_gateway() -> None:
     if gateway_procs():
         log.info("gateway already running")
@@ -140,6 +175,9 @@ def start_gateway() -> None:
         )
     except Exception as e:
         log.error("gateway start failed: %s", e)
+    # `gateway start` re-adds Hermes's login autostart entry; strip it again so
+    # the gateway stays bound to the desktop app.
+    suppress_hermes_autostart()
 
 
 def stop_gateway() -> None:
@@ -283,6 +321,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _bye)
 
     # Adopt reality on boot instead of assuming a clean slate.
+    suppress_hermes_autostart()
     desktop_up = desktop_running()
     services_up = bool(gateway_procs())
     log.info("supervisor started (desktop=%s, gateway=%s, mirror=%s)",
