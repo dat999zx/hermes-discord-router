@@ -48,6 +48,19 @@ DISCORD_API = "https://discord.com/api/v10"
 # the gateway already renders those, and re-posting them would loop.
 DESKTOP_SOURCES = {"", "tui", "desktop", "webui", "local", "cli"}
 
+# The gateway prefixes relayed platform messages with the sender's display
+# name, e.g. "[IsntDatEpik?] hello". Some relayed rows land in state.db with no
+# platform_message_id, so this prefix is the second signal for "came from
+# Discord, don't mirror it back".
+_RELAYED_PREFIX_RE = re.compile(r"^\s*\[[^\]\n]{1,64}\]\s")
+
+# Gateway-injected system noise that should never be mirrored as a turn.
+_NOISE_PREFIXES = (
+    "Operation interrupted:",
+    "[Triggering message id:",
+    "[CONTEXT COMPACTION",
+)
+
 
 class Mirror:
     def __init__(self, cfg: dict):
@@ -79,6 +92,11 @@ class Mirror:
         # session_id -> thread_id (persisted so restarts reuse threads)
         self.thread_map_path = hermes_home / "desktop_mirror_threads.json"
         self.session_threads: Dict[str, str] = self._load_thread_map()
+
+        # Sessions whose CURRENT turn came in over Discord -- used to skip the
+        # assistant reply that follows a Discord-origin prompt (the gateway
+        # already delivers it). Runtime-only; rebuilt as turns stream in.
+        self.discord_turn_sessions: set = set()
 
         # last mirrored messages.id (cursor), persisted
         self.cursor_path = hermes_home / "desktop_mirror_cursor.json"
@@ -234,14 +252,21 @@ class Mirror:
     # ---- DB tail -------------------------------------------------------
 
     def _fetch_new_turns(self) -> List[dict]:
-        """Return new user/assistant messages for Desktop sessions since cursor."""
+        """Return new user/assistant messages since the cursor.
+
+        Desktop-vs-Discord is decided PER MESSAGE, not per session: a session's
+        `source` stays 'discord' even for turns you type in the Desktop app, so
+        filtering on the session would skip exactly what we want to mirror.
+        A user message that arrived over Discord carries a platform_message_id;
+        one typed in Desktop does not.
+        """
         conn = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
                 """
                 SELECT m.id, m.session_id, m.role, m.content, m.timestamp,
-                       s.source, s.cwd
+                       m.platform_message_id, s.source, s.cwd
                 FROM messages m
                 JOIN sessions s ON s.id = m.session_id
                 WHERE m.id > ?
@@ -283,16 +308,44 @@ class Mirror:
                 turns = self._fetch_new_turns()
                 for t in turns:
                     self.cursor = max(self.cursor, int(t["id"]))
-                    source = (t.get("source") or "").strip().lower()
-                    if source not in DESKTOP_SOURCES:
-                        continue  # gateway-owned (discord/telegram/...) -> skip
-                    channel_id = self._channel_for_cwd(t.get("cwd"))
-                    if not channel_id:
-                        continue  # session's cwd isn't a mapped project
                     sid = t["session_id"]
                     role = t["role"]
                     content = t["content"] or ""
-                    thread_id = self._ensure_thread(channel_id, sid, content if role == "user" else "Hermes session")
+                    source = (t.get("source") or "").strip().lower()
+
+                    # Drop gateway/system noise outright.
+                    if content.lstrip().startswith(_NOISE_PREFIXES):
+                        continue
+
+                    # Decide whether THIS user turn arrived over Discord.
+                    # Two signals, because neither alone is reliable:
+                    #  * platform_message_id -- set for most relayed messages
+                    #  * "[Name] ..." prefix -- the gateway stamps relayed text
+                    #    with the sender's display name (shared/multi-user
+                    #    sessions), and some relayed rows carry no platform id.
+                    if role == "user":
+                        from_discord = bool(t.get("platform_message_id")) or bool(
+                            _RELAYED_PREFIX_RE.match(content)
+                        )
+                        if from_discord:
+                            self.discord_turn_sessions.add(sid)
+                            continue
+                        self.discord_turn_sessions.discard(sid)
+                    elif sid in self.discord_turn_sessions:
+                        continue  # reply to a Discord-origin prompt
+
+                    channel_id = self._channel_for_cwd(t.get("cwd"))
+                    if not channel_id:
+                        continue  # session's cwd isn't a mapped project
+
+                    # Only a user turn may open a thread -- that way the thread
+                    # is named from your actual prompt instead of a generic
+                    # placeholder. An assistant turn with no thread yet belongs
+                    # to a conversation that started before the mirror did.
+                    if role == "assistant" and sid not in self.session_threads:
+                        continue
+
+                    thread_id = self._ensure_thread(channel_id, sid, content)
                     if not thread_id:
                         continue
                     prefix = "**You:** " if role == "user" else ""
@@ -333,5 +386,61 @@ def load_config() -> dict:
     return cfg
 
 
+def _acquire_single_instance_lock(hermes_home: Path):
+    """Ensure only one mirror runs. Returns the lock handle (keep it alive).
+
+    Two copies would double-post every turn. The Windows autostart path can
+    launch more than one process, so the guard lives here rather than in the
+    launcher.
+    """
+    lock_path = hermes_home / "desktop_mirror.lock"
+    try:
+        # Open r+ (create if needed) and ensure at least 1 byte exists BEFORE
+        # locking: msvcrt.locking() locks a byte RANGE, and locking byte 0 of a
+        # zero-length file succeeds for every process -- silently defeating the
+        # guard. Write a placeholder first, then lock that byte.
+        if not lock_path.exists():
+            lock_path.write_text("0", encoding="utf-8")
+        fh = open(lock_path, "r+")
+        if os.path.getsize(lock_path) == 0:
+            fh.write("0")
+            fh.flush()
+            fh.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                fh.close()
+                log.info("another desktop_mirror instance holds the lock — exiting")
+                sys.exit(0)
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                fh.close()
+                log.info("another desktop_mirror instance holds the lock — exiting")
+                sys.exit(0)
+        # Record our pid AFTER the lock byte (never truncate the locked byte).
+        try:
+            fh.seek(1)
+            fh.truncate(1)
+            fh.write(f" pid={os.getpid()}\n")
+            fh.flush()
+        except Exception:
+            pass
+        return fh
+    except SystemExit:
+        raise
+    except Exception as e:
+        log.debug("single-instance lock unavailable (%s) — continuing", e)
+        return None
+
+
 if __name__ == "__main__":
-    Mirror(load_config()).run()
+    _cfg = load_config()
+    _home = Path(_cfg.get("hermes_home") or (Path(os.environ.get("LOCALAPPDATA", "")) / "hermes"))
+    _lock = _acquire_single_instance_lock(_home)  # noqa: F841 (held for process life)
+    Mirror(_cfg).run()
