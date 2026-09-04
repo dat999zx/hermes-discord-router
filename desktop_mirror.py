@@ -59,6 +59,8 @@ _NOISE_PREFIXES = (
     "Operation interrupted:",
     "[Triggering message id:",
     "[CONTEXT COMPACTION",
+    "[System:",
+    "[OUT-OF-BAND USER MESSAGE",
 )
 
 
@@ -97,6 +99,9 @@ class Mirror:
         # assistant reply that follows a Discord-origin prompt (the gateway
         # already delivers it). Runtime-only; rebuilt as turns stream in.
         self.discord_turn_sessions: set = set()
+
+        # chat_id -> mapped parent channel (or None). Avoids a REST call per turn.
+        self._parent_cache: Dict[str, Optional[str]] = {}
 
         # last mirrored messages.id (cursor), persisted
         self.cursor_path = hermes_home / "desktop_mirror_cursor.json"
@@ -259,6 +264,10 @@ class Mirror:
         filtering on the session would skip exactly what we want to mirror.
         A user message that arrived over Discord carries a platform_message_id;
         one typed in Desktop does not.
+
+        ``chat_id`` is selected alongside ``cwd`` so a session with no cwd (one
+        created before channel routing existed, or whose channel was mapped
+        later) can still be matched by its Discord channel.
         """
         conn = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
@@ -266,7 +275,7 @@ class Mirror:
             rows = conn.execute(
                 """
                 SELECT m.id, m.session_id, m.role, m.content, m.timestamp,
-                       m.platform_message_id, s.source, s.cwd
+                       m.platform_message_id, s.source, s.cwd, s.chat_id
                 FROM messages m
                 JOIN sessions s ON s.id = m.session_id
                 WHERE m.id > ?
@@ -282,10 +291,62 @@ class Mirror:
             conn.close()
         return [dict(r) for r in rows]
 
+    def _thread_for_turn(self, turn: dict, channel_id: str, seed_text: str) -> Optional[str]:
+        """Return the thread id to post this turn into.
+
+        If the session already lives in a Discord thread (you were chatting
+        there and switched to Desktop), post into THAT thread -- the whole
+        point is that both surfaces show one conversation. Only when a session
+        has no Discord thread of its own do we create one.
+        """
+        chat_id = str(turn.get("chat_id") or "")
+        if chat_id and chat_id != channel_id:
+            # chat_id is a thread; use it when it hangs off a mapped channel.
+            if self._parent_channel(chat_id) == channel_id:
+                return chat_id
+        return self._ensure_thread(channel_id, turn["session_id"], seed_text)
+
     def _channel_for_cwd(self, cwd: Optional[str]) -> Optional[str]:
         if not cwd:
             return None
         return self.cwd_to_channel.get(self._norm(cwd))
+
+    def _parent_channel(self, chat_id: str) -> Optional[str]:
+        """Resolve a Discord chat_id to its mapped parent channel.
+
+        A session's chat_id is the THREAD id when the conversation lives in a
+        thread, and threads are not in the config map -- only their parent
+        channel is. One REST lookup per id, cached.
+        """
+        if not chat_id:
+            return None
+        if chat_id in self.cwd_to_channel.values():
+            return chat_id  # already a mapped channel
+        if chat_id in self._parent_cache:
+            return self._parent_cache[chat_id]
+        parent = None
+        try:
+            r = self.http.get(f"{DISCORD_API}/channels/{chat_id}", timeout=15)
+            if r.ok:
+                pid = str(r.json().get("parent_id") or "")
+                if pid and pid in self.cwd_to_channel.values():
+                    parent = pid
+        except Exception as e:
+            log.debug("parent lookup failed for %s: %s", chat_id, e)
+        self._parent_cache[chat_id] = parent
+        return parent
+
+    def _target_channel(self, turn: dict) -> Optional[str]:
+        """Pick the channel to mirror a turn into.
+
+        cwd is the primary key (it is what channel routing sets). Falling back
+        to the session's Discord channel keeps sessions working when they have
+        no cwd -- created before routing existed, or mapped after the fact.
+        """
+        ch = self._channel_for_cwd(turn.get("cwd"))
+        if ch:
+            return ch
+        return self._parent_channel(str(turn.get("chat_id") or ""))
 
     def run(self) -> None:
         if not self.state_db.exists():
@@ -334,18 +395,20 @@ class Mirror:
                     elif sid in self.discord_turn_sessions:
                         continue  # reply to a Discord-origin prompt
 
-                    channel_id = self._channel_for_cwd(t.get("cwd"))
+                    channel_id = self._target_channel(t)
                     if not channel_id:
-                        continue  # session's cwd isn't a mapped project
+                        continue  # not a mapped project or channel
 
-                    # Only a user turn may open a thread -- that way the thread
-                    # is named from your actual prompt instead of a generic
-                    # placeholder. An assistant turn with no thread yet belongs
-                    # to a conversation that started before the mirror did.
-                    if role == "assistant" and sid not in self.session_threads:
+                    # Only a user turn may open a NEW thread, so a fresh thread
+                    # is named from your actual prompt. A session that already
+                    # lives in a Discord thread posts there regardless of role.
+                    _existing = self.session_threads.get(sid) or (
+                        str(t.get("chat_id") or "") not in ("", channel_id)
+                    )
+                    if role == "assistant" and not _existing:
                         continue
 
-                    thread_id = self._ensure_thread(channel_id, sid, content)
+                    thread_id = self._thread_for_turn(t, channel_id, content)
                     if not thread_id:
                         continue
                     prefix = "**You:** " if role == "user" else ""
