@@ -49,7 +49,7 @@ DISCORD_API = "https://discord.com/api/v10"
 DESKTOP_SOURCES = {"", "tui", "desktop", "webui", "local", "cli"}
 
 # The gateway prefixes relayed platform messages with the sender's display
-# name, e.g. "[IsntDatEpik?] hello". Some relayed rows land in state.db with no
+# name, e.g. "[SomeUser] hello". Some relayed rows land in state.db with no
 # platform_message_id, so this prefix is the second signal for "came from
 # Discord, don't mirror it back".
 _RELAYED_PREFIX_RE = re.compile(r"^\s*\[[^\]\n]{1,64}\]\s")
