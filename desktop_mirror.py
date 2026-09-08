@@ -29,6 +29,7 @@ import json
 import time
 import sqlite3
 import logging
+import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any, List
 
@@ -239,13 +240,22 @@ class Mirror:
            waives it for threads listed here. A thread the bot did not create
            itself is absent, so the reply is dropped at ingress and never even
            reaches the log.
-        2. ``sessions.chat_id`` -- ``find_session_by_origin()`` matches an
-           incoming Discord message to a live session by ``chat_id``. Desktop
-           sessions store NULL, so even an admitted message could not find its
-           session and would start a fresh one with no history.
+        2. ``gateway_routing`` (state.db) -- the routing index. This is what
+           actually decides which session an incoming Discord message continues.
+           ``build_session_key()`` turns the message into
+           ``agent:main:discord:thread:<channel>:<thread>`` and looks THAT up; a
+           missing entry means the gateway starts a brand-new session, so the
+           reply lands in a different conversation with none of the history.
+           (``sessions.chat_id`` is NOT this mechanism -- it only feeds
+           ``gateway/mirror.py``'s delivery mirroring. It is set too, since it
+           costs nothing and keeps that path consistent.)
 
-        Both files/columns are the gateway's own formats, so this only writes
-        what the gateway would have written had it created the thread.
+        Everything written here is in the gateway's own formats -- only what it
+        would have written had it created the thread itself.
+
+        NOTE: the gateway reads BOTH the thread tracker and the routing index
+        once at startup and never re-reads them, so a thread adopted while it is
+        running stays unreachable until the gateway restarts.
         """
         # 1) register with the bot's thread tracker (plain JSON list of ids)
         try:
@@ -264,7 +274,10 @@ class Mirror:
         except Exception as e:
             log.warning("could not register thread %s: %s", thread_id, e)
 
-        # 2) point the session's chat_id at the thread so replies resolve to it
+        # 2) claim the routing key so replies CONTINUE this session
+        self._claim_routing(thread_id, session_id)
+
+        # 3) point the session's chat_id at the thread (delivery-mirror path)
         try:
             conn = sqlite3.connect(str(self.state_db), timeout=10)
             try:
@@ -279,6 +292,51 @@ class Mirror:
                 conn.close()
         except Exception as e:
             log.warning("could not link session %s: %s", session_id, e)
+
+    def _claim_routing(self, thread_id: str, session_id: str) -> None:
+        """Write the gateway_routing row that maps this thread to this session.
+
+        The gateway routes an incoming message by SESSION KEY, not by chat_id:
+        `build_session_key()` (gateway/session.py) produces
+        `agent:main:discord:thread:<chat_id>:<thread_id>` and looks it up in the
+        `gateway_routing` table. A mirror-created thread has no such row, so the
+        gateway falls through to "no existing session" and creates a new one --
+        the reply appears to go to a stranger with no history.
+
+        A thread's chat_id IS its own id for a message posted in that thread, so
+        both slots carry thread_id (matches every real Discord routing row).
+
+        Never overwrites an existing key: if the gateway already owns this
+        thread, its entry is authoritative.
+        """
+        key = f"agent:main:discord:thread:{thread_id}:{thread_id}"
+        # entry_json timestamps are ISO strings; the updated_at COLUMN is a REAL epoch.
+        iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        entry = {
+            "session_key": key, "session_id": session_id,
+            "created_at": iso, "updated_at": iso,
+            "platform": "discord", "chat_type": "thread", "metadata": {},
+            "origin": {
+                "platform": "discord", "chat_id": thread_id,
+                "chat_type": "thread", "thread_id": thread_id,
+            },
+        }
+        try:
+            conn = sqlite3.connect(str(self.state_db), timeout=10)
+            try:
+                scope = str(self.hermes_home / "sessions")
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO gateway_routing (scope, session_key, entry_json, updated_at)"
+                    " VALUES (?,?,?,?)",
+                    (scope, key, json.dumps(entry), time.time()),
+                )
+                conn.commit()
+                if cur.rowcount:
+                    log.info("claimed routing %s -> %s (restart gateway to load it)", key, session_id)
+            finally:
+                conn.close()
+        except Exception as e:
+            log.warning("could not claim routing for %s: %s", thread_id, e)
 
     def _send(self, thread_id: str, content: str) -> None:
         # Discord hard limit 2000 chars/message -> chunk.

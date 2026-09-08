@@ -4,7 +4,7 @@ Same two writes as desktop_mirror._adopt_thread, applied to the existing map.
 Idempotent: skips threads already registered / sessions already linked.
 Run with the mirror stopped (it holds no lock on these files, but avoid races).
 """
-import json, os, sqlite3, sys
+import json, os, sqlite3, sys, time
 from pathlib import Path
 
 HOME = Path(os.environ.get("HERMES_HOME") or (Path(os.environ["LOCALAPPDATA"]) / "hermes"))
@@ -38,18 +38,46 @@ for sid, tid in mapping.items():
         linked += 1
         print(f"  linked {sid} -> {tid}")
 conn.commit()
-
 print(f"sessions: linked {linked}")
+
+# gateway_routing: the row that actually decides which session a reply continues
+scope = str(HOME / "sessions")
+claimed = 0
+for sid, tid in mapping.items():
+    key = f"agent:main:discord:thread:{tid}:{tid}"
+    iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+    entry = {
+        "session_key": key, "session_id": sid,
+        "created_at": iso, "updated_at": iso,
+        "platform": "discord", "chat_type": "thread", "metadata": {},
+        "origin": {"platform": "discord", "chat_id": str(tid),
+                   "chat_type": "thread", "thread_id": str(tid)},
+    }
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO gateway_routing (scope, session_key, entry_json, updated_at)"
+        " VALUES (?,?,?,?)",
+        (scope, key, json.dumps(entry), time.time()),
+    )
+    if cur.rowcount:
+        claimed += 1
+        print(f"  claimed routing {key} -> {sid}")
+conn.commit()
+print(f"routing: claimed {claimed} (existing gateway-owned keys left alone)")
 
 # verify
 known2 = {str(i) for i in json.loads(tracker.read_text(encoding='utf-8'))}
 missing = [t for t in mapping.values() if str(t) not in known2]
 print("\nVERIFY tracker missing:", missing or "none")
-rows = conn.execute(
-    "SELECT id, chat_id FROM sessions WHERE id IN (%s)" % ",".join("?" * len(mapping)),
-    list(mapping),
-).fetchall()
-for sid, chat in rows:
-    exp = str(mapping[sid])
-    print(f"  {sid}: chat_id={chat!r} {'OK' if str(chat or '')==exp else 'MISMATCH/absent-session'}")
+bad = []
+for sid, tid in mapping.items():
+    row = conn.execute(
+        "SELECT entry_json FROM gateway_routing WHERE session_key=?",
+        (f"agent:main:discord:thread:{tid}:{tid}",),
+    ).fetchone()
+    if not row:
+        bad.append((sid, tid, "NO ROUTING ROW"))
+    elif json.loads(row[0]).get("session_id") != sid:
+        bad.append((sid, tid, "routed to " + str(json.loads(row[0]).get("session_id"))))
+print("VERIFY routing mismatches:", bad or "none")
 conn.close()
+print("\nRESTART THE GATEWAY: routing + thread tracker are read once at startup.")
