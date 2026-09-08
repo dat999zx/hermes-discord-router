@@ -96,10 +96,12 @@ class Mirror:
         self.thread_map_path = hermes_home / "desktop_mirror_threads.json"
         self.session_threads: Dict[str, str] = self._load_thread_map()
 
-        # Sessions whose CURRENT turn came in over Discord -- used to skip the
+        # Threads whose CURRENT turn came in over Discord -- used to skip the
         # assistant reply that follows a Discord-origin prompt (the gateway
-        # already delivers it). Runtime-only; rebuilt as turns stream in.
-        self.discord_turn_sessions: set = set()
+        # already delivers it). Keyed by THREAD, not session: one thread can
+        # host both the mirror's desktop session and the gateway's discord
+        # session. Runtime-only; rebuilt as turns stream in.
+        self.discord_turn_threads: set = set()
 
         # chat_id -> mapped parent channel (or None). Avoids a REST call per turn.
         self._parent_cache: Dict[str, Optional[str]] = {}
@@ -507,16 +509,10 @@ class Mirror:
                     #  * "[Name] ..." prefix -- the gateway stamps relayed text
                     #    with the sender's display name (shared/multi-user
                     #    sessions), and some relayed rows carry no platform id.
-                    if role == "user":
-                        from_discord = bool(t.get("platform_message_id")) or bool(
-                            _RELAYED_PREFIX_RE.match(content)
-                        )
-                        if from_discord:
-                            self.discord_turn_sessions.add(sid)
-                            continue
-                        self.discord_turn_sessions.discard(sid)
-                    elif sid in self.discord_turn_sessions:
-                        continue  # reply to a Discord-origin prompt
+                    from_discord = role == "user" and (
+                        bool(t.get("platform_message_id"))
+                        or bool(_RELAYED_PREFIX_RE.match(content))
+                    )
 
                     channel_id = self._target_channel(t)
                     if not channel_id:
@@ -534,6 +530,26 @@ class Mirror:
                     thread_id = self._thread_for_turn(t, channel_id, content)
                     if not thread_id:
                         continue
+
+                    # Echo guard, keyed by THREAD -- not by session.
+                    #
+                    # A Discord-origin prompt and the reply to it are both
+                    # delivered by the gateway itself, so mirroring either one
+                    # duplicates it. Keying this on the session used to work,
+                    # but a thread can host TWO sessions: the desktop session the
+                    # mirror opened the thread for, and the separate discord
+                    # session the gateway routes replies into. Different sids,
+                    # same thread -- so a session-keyed guard never fired and
+                    # every gateway reply appeared twice.
+                    if from_discord:
+                        self.discord_turn_threads.add(thread_id)
+                        continue
+                    if role == "user":
+                        # A prompt typed in Desktop hands the thread back to the
+                        # mirror (the gateway is not answering this one).
+                        self.discord_turn_threads.discard(thread_id)
+                    elif thread_id in self.discord_turn_threads:
+                        continue  # gateway already posted this reply
                     prefix = "**You:** " if role == "user" else ""
                     self._send(thread_id, f"{prefix}{content}")
                     log.info("mirrored %s turn (msg %s) session %s -> thread %s",
