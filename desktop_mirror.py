@@ -499,20 +499,26 @@ class Mirror:
                     content = t["content"] or ""
                     source = (t.get("source") or "").strip().lower()
 
-                    # Drop gateway/system noise outright.
-                    if content.lstrip().startswith(_NOISE_PREFIXES):
-                        continue
-
                     # Decide whether THIS user turn arrived over Discord.
                     # Two signals, because neither alone is reliable:
                     #  * platform_message_id -- set for most relayed messages
                     #  * "[Name] ..." prefix -- the gateway stamps relayed text
                     #    with the sender's display name (shared/multi-user
                     #    sessions), and some relayed rows carry no platform id.
+                    # Decided BEFORE the noise drop: relayed rows start with
+                    # "[Triggering message id:" -- itself a noise prefix -- so
+                    # dropping noise first swallowed exactly the row that arms
+                    # the echo guard, and every gateway-delivered reply was
+                    # mirrored a second time.
                     from_discord = role == "user" and (
                         bool(t.get("platform_message_id"))
                         or bool(_RELAYED_PREFIX_RE.match(content))
                     )
+
+                    # Drop gateway/system noise -- unless it is a relayed
+                    # Discord prompt, which must still reach the guard below.
+                    if not from_discord and content.lstrip().startswith(_NOISE_PREFIXES):
+                        continue
 
                     channel_id = self._target_channel(t)
                     if not channel_id:
