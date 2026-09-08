@@ -74,7 +74,7 @@ def venv_python(home: Path) -> Path:
 
 # -------------------------------------------------------------------- patch
 
-ADAPTER_ANCHOR = '        seeded_extra["no_thread_channels"] = str(ntc)\n'
+ADAPTER_ANCHOR = '    _gate("no_thread_channels", "DISCORD_NO_THREAD_CHANNELS", from_platform_extra=False)\n'
 ADAPTER_MARKER = "# channel_projects: route channels to specific Hermes projects."
 ADAPTER_PATCH = '''
     # channel_projects: route channels to specific Hermes projects.
@@ -125,8 +125,8 @@ RUN_PATCH = '''        # Discord channel-project routing (external module)
                 logger.debug("Discord routing failed: %s", _e)
 
 '''
-RUN_CWD_OLD = "            cron_session=\"\",\n        )"
-RUN_CWD_NEW = "            cron_session=\"\",\n            cwd=_channel_cwd,\n        )"
+RUN_CWD_OLD = "            cron_session=\"\")"
+RUN_CWD_NEW = "            cron_session=\"\",\n            cwd=_channel_cwd)"
 
 
 def patch_file(path: Path, marker: str, anchor: str, insert: str, *, after=True) -> str:
