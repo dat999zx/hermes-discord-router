@@ -223,8 +223,62 @@ class Mirror:
         tid = str(created["id"])
         self.session_threads[session_id] = tid
         self._save_thread_map()
+        self._adopt_thread(tid, session_id)
         log.info("created thread '%s' (%s) for session %s", name, tid, session_id)
         return tid
+
+    def _adopt_thread(self, thread_id: str, session_id: str) -> None:
+        """Make a mirror-created thread a real two-way session.
+
+        Without this the thread is write-only: you see the conversation in
+        Discord but replying there does nothing. Two separate gates have to be
+        satisfied, and missing EITHER one silently drops the message:
+
+        1. ``discord_threads.json`` -- the gateway's ThreadParticipationTracker.
+           ``require_mention`` defaults to true, and ``_in_bot_thread()`` only
+           waives it for threads listed here. A thread the bot did not create
+           itself is absent, so the reply is dropped at ingress and never even
+           reaches the log.
+        2. ``sessions.chat_id`` -- ``find_session_by_origin()`` matches an
+           incoming Discord message to a live session by ``chat_id``. Desktop
+           sessions store NULL, so even an admitted message could not find its
+           session and would start a fresh one with no history.
+
+        Both files/columns are the gateway's own formats, so this only writes
+        what the gateway would have written had it created the thread.
+        """
+        # 1) register with the bot's thread tracker (plain JSON list of ids)
+        try:
+            p = self.hermes_home / "discord_threads.json"
+            ids = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+            if not isinstance(ids, list):
+                ids = []
+            if thread_id not in (str(i) for i in ids):
+                ids.append(thread_id)
+                # ponytail: mirrors ThreadParticipationTracker's 500-entry cap;
+                # raise both together if the gateway's cap ever changes.
+                tmp = p.with_suffix(".tmp")
+                tmp.write_text(json.dumps(ids[-500:]), encoding="utf-8")
+                os.replace(tmp, p)
+                log.info("registered thread %s with the bot thread tracker", thread_id)
+        except Exception as e:
+            log.warning("could not register thread %s: %s", thread_id, e)
+
+        # 2) point the session's chat_id at the thread so replies resolve to it
+        try:
+            conn = sqlite3.connect(str(self.state_db), timeout=10)
+            try:
+                cur = conn.execute(
+                    "UPDATE sessions SET chat_id=? WHERE id=? AND COALESCE(chat_id,'')=''",
+                    (thread_id, session_id),
+                )
+                conn.commit()
+                if cur.rowcount:
+                    log.info("linked session %s -> chat_id %s", session_id, thread_id)
+            finally:
+                conn.close()
+        except Exception as e:
+            log.warning("could not link session %s: %s", session_id, e)
 
     def _send(self, thread_id: str, content: str) -> None:
         # Discord hard limit 2000 chars/message -> chunk.
@@ -307,9 +361,20 @@ class Mirror:
         return self._ensure_thread(channel_id, turn["session_id"], seed_text)
 
     def _channel_for_cwd(self, cwd: Optional[str]) -> Optional[str]:
-        if not cwd:
-            return None
-        return self.cwd_to_channel.get(self._norm(cwd))
+        """Map a session's cwd to a channel; an unset cwd means the home dir.
+
+        Hermes deliberately stores NULL cwd for Desktop sessions that never
+        explicitly chose a workspace (`_persisted_session_cwd` +
+        `_LAUNCH_CWD_NOT_A_WORKSPACE` in tui_gateway/session_workdir.py): the
+        app's launch directory is an artifact, not a folder the user picked, so
+        it is not written to the DB. That launch directory IS the home dir, and
+        the Desktop sidebar shows those sessions under the Home project — so
+        falling back to the home dir's channel restores exactly the mapping the
+        user sees. Projects with a real chosen folder (a repo) are unaffected:
+        they persist a cwd and match on the line above.
+        """
+        key = self._norm(cwd) if cwd else self._norm(os.path.expanduser("~"))
+        return self.cwd_to_channel.get(key)
 
     def _parent_channel(self, chat_id: str) -> Optional[str]:
         """Resolve a Discord chat_id to its mapped parent channel.
