@@ -585,7 +585,37 @@ def load_config() -> dict:
         log.error("no bot_token resolved (config, env, or hermes .env)")
         sys.exit(1)
     cfg["bot_token"] = tok
+
+    # Channel list: hermes's own config.yaml is the single source of truth.
+    # Keeping a second copy here meant every new channel had to be added twice
+    # and silently didn't mirror when it wasn't. Only fall back to a local
+    # `channels:` block if hermes has none.
+    home = Path(cfg.get("hermes_home") or (Path(os.environ.get("LOCALAPPDATA", "")) / "hermes"))
+    cfg["channels"] = hermes_channels(home) or cfg.get("channels", [])
     return cfg
+
+
+def hermes_channels(hermes_home: Path) -> list:
+    """Read discord.channels out of hermes's config.yaml, as mirror entries.
+
+    Hermes writes `project:` (a name OR a path) or `folder:`; the mirror's
+    resolver takes `cwd`/`project` and treats anything with a separator as a
+    path, so folder maps onto cwd directly.
+    """
+    p = Path(hermes_home) / "config.yaml"
+    if not p.exists():
+        return []
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        entries = (data.get("discord") or {}).get("channels") or []
+    except Exception as e:
+        log.warning("could not read hermes config.yaml channels: %s", e)
+        return []
+    out = []
+    for e in entries:
+        if isinstance(e, dict) and e.get("id"):
+            out.append({"id": str(e["id"]), "cwd": e.get("folder"), "project": e.get("project")})
+    return out
 
 
 def _acquire_single_instance_lock(hermes_home: Path):
