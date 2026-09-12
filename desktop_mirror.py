@@ -598,9 +598,10 @@ def load_config() -> dict:
 def hermes_channels(hermes_home: Path) -> list:
     """Read discord.channels out of hermes's config.yaml, as mirror entries.
 
-    Hermes writes `project:` (a name OR a path) or `folder:`; the mirror's
-    resolver takes `cwd`/`project` and treats anything with a separator as a
-    path, so folder maps onto cwd directly.
+    Hermes writes `project:` (a name OR a path); older/hand-written configs may
+    use `folder:`. Accept both -- the mirror's resolver takes `cwd`/`project`
+    and treats anything with a separator as a path, so a folder path maps onto
+    cwd directly, and a bare name still falls through to the projects.db lookup.
     """
     p = Path(hermes_home) / "config.yaml"
     if not p.exists():

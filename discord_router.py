@@ -74,6 +74,36 @@ def resolve_project_to_cwd(project: str) -> str:
     return ""
 
 
+def _session_cwd_from_db(session_id: str) -> str:
+    """The cwd already recorded for this session, or "".
+
+    Threads created by the desktop mirror carry the project the session was
+    started in, but a thread id is not in the channel map -- only its parent
+    channel is. When the parent lookup misses (an unmapped channel, or a DM),
+    the session's OWN stored cwd is the correct answer, and returning "" would
+    blank it: the gateway passes the result straight into set_session_vars,
+    which sets the ContextVar every project-aware consumer reads.
+    """
+    if not session_id:
+        return ""
+    try:
+        db_path = _hermes_home() / "state.db"
+        if not db_path.exists():
+            return ""
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT cwd FROM sessions WHERE session_key = ? OR id = ? LIMIT 1",
+                (session_id, session_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        return str(row[0]) if row and row[0] else ""
+    except Exception as e:
+        logger.debug("Could not read stored cwd for session %s: %s", session_id, e)
+        return ""
+
+
 def route_discord_channel(context: Any, session_db: Any) -> Optional[str]:
     """
     Route a Discord message to a project based on channel configuration.
@@ -85,18 +115,20 @@ def route_discord_channel(context: Any, session_db: Any) -> Optional[str]:
     Returns:
         The resolved cwd path, or None if no routing configured
     """
+    session_id = str(getattr(context, "session_id", "") or "")
+
     # Check for Discord channel→project mapping
     channel_projects_json = os.environ.get("DISCORD_CHANNEL_PROJECTS", "")
     if not channel_projects_json:
-        return None
+        return _session_cwd_from_db(session_id) or None
     
     try:
         channel_projects = json.loads(channel_projects_json)
     except json.JSONDecodeError:
-        return None
+        return _session_cwd_from_db(session_id) or None
     
     if not channel_projects or not isinstance(channel_projects, dict):
-        return None
+        return _session_cwd_from_db(session_id) or None
     
     # Get chat_id and parent_chat_id from context
     chat_id = str(getattr(context.source, "chat_id", "") or "")
@@ -107,12 +139,14 @@ def route_discord_channel(context: Any, session_db: Any) -> Optional[str]:
     # Look up project (threads use parent_chat_id which is the channel)
     project = channel_projects.get(chat_id) or channel_projects.get(parent_chat_id)
     if not project:
-        return None
+        # Unmapped channel, or a thread whose parent could not be read. Keep the
+        # session where it already is rather than blanking it.
+        return _session_cwd_from_db(session_id) or None
     
     # Resolve project to cwd
     cwd = resolve_project_to_cwd(project)
     if not cwd:
-        return None
+        return _session_cwd_from_db(session_id) or None
     
     logger.info("Discord routing: channel %s → project '%s' → cwd '%s'",
                parent_chat_id or chat_id, project, cwd)

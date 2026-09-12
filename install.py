@@ -255,16 +255,57 @@ def remove_autostart() -> None:
 
 # --------------------------------------------------------------------- main
 
+def existing_channels(home: Path) -> list[tuple[str, str]]:
+    """Channels already mapped in hermes's config.yaml.
+
+    Re-running the installer is the NORMAL repair path: a Hermes update
+    overwrites gateway/run.py and silently removes the patch, so the fix is to
+    run install.py again. Asking for the whole channel map again at that point
+    is how a repair turns into a reconfiguration.
+    """
+    try:
+        import yaml  # optional: only needed to reuse an existing map
+    except ImportError:
+        return []
+    cfg = home / "config.yaml"
+    if not cfg.exists():
+        return []
+    try:
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    out = []
+    for e in (data.get("discord") or {}).get("channels") or []:
+        if isinstance(e, dict) and e.get("id"):
+            folder = e.get("folder") or e.get("project") or ""
+            if folder:
+                out.append((str(e["id"]), str(folder).replace("\\", "/")))
+    return out
+
+
 def prompt_channels() -> list[tuple[str, str]]:
+    # Non-interactive (CI, a pipe, an agent shell): returning empty leaves any
+    # existing config untouched, which beats crashing on EOFError after the
+    # gateway patches have already been written.
+    if not sys.stdin or not sys.stdin.isatty():
+        print("\nNo channel map given and stdin is not a terminal -- keeping any existing config.")
+        print("Pass --channel ID=FOLDER to set one non-interactively.")
+        return []
     print("\nMap Discord channels to project folders (blank ID to finish).")
     print("Channel ID: right-click a channel in Discord > Copy Channel ID")
     print("(Discord > Settings > Advanced > Developer Mode must be on)\n")
     out = []
     while True:
-        cid = input("  Channel ID: ").strip()
+        try:
+            cid = input("  Channel ID: ").strip()
+        except EOFError:
+            break
         if not cid:
             break
-        folder = input("  Project folder (absolute path): ").strip()
+        try:
+            folder = input("  Project folder (absolute path): ").strip()
+        except EOFError:
+            break
         if folder:
             out.append((cid, folder.replace("\\", "/")))
     return out
@@ -305,6 +346,12 @@ def main() -> None:
         if "=" in spec:
             cid, folder = spec.split("=", 1)
             channels.append((cid.strip(), folder.strip().replace("\\", "/")))
+    if not channels:
+        # Reuse what hermes already has before asking. Repairing a patch that an
+        # update wiped must not require retyping the map.
+        channels = existing_channels(home)
+        if channels:
+            print(f"\n  reusing {len(channels)} channel(s) already in config.yaml")
     if not channels:
         channels = prompt_channels()
 
