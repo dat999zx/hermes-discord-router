@@ -30,6 +30,7 @@ import time
 import sqlite3
 import logging
 import datetime
+import subprocess
 from pathlib import Path
 from typing import Dict, Optional, Any, List
 
@@ -55,6 +56,39 @@ DESKTOP_SOURCES = {"", "tui", "desktop", "webui", "local", "cli"}
 # Discord, don't mirror it back".
 _RELAYED_PREFIX_RE = re.compile(r"^\s*\[[^\]\n]{1,64}\]\s")
 
+def _sql_placeholders(values) -> str:
+    return ",".join("?" * len(values))
+
+
+# How often to reconcile threads against sessions (both deletion directions).
+_SWEEP_SECONDS = 60.0
+
+
+# Sources the Desktop sidebar never lists (its own deny-list, plus subagent runs).
+_DENY_SOURCES = ("cron", "kanban", "tool", "subagent")
+
+
+def _listable_child_sql(hermes_home: Path) -> str:
+    """Hermes's own "is this a conversation a human sees" predicate, for `sessions s`.
+
+    Subagent runs and compression continuations are rows in state.db like any
+    other, so mirroring every session buried the real ones under dozens of
+    machine threads. Hermes already answers this for its session picker, so
+    import its predicate rather than re-deriving one that drifts. Falls back to
+    "roots only" if the symbol moves in an update (loses branch/reset children,
+    keeps the noise out, never crashes the mirror).
+    """
+    agent = str(Path(hermes_home) / "hermes-agent")
+    try:
+        if agent not in sys.path:
+            sys.path.insert(0, agent)
+        from hermes_state_common import _LISTABLE_CHILD_SQL
+        return _LISTABLE_CHILD_SQL
+    except Exception as e:
+        log.warning("hermes listable predicate unavailable (%s) — roots only", e)
+        return "(s.parent_session_id IS NULL)"
+
+
 # Gateway-injected system noise that should never be mirrored as a turn.
 _NOISE_PREFIXES = (
     "Operation interrupted:",
@@ -78,6 +112,7 @@ class Mirror:
         self.state_db = hermes_home / "state.db"
         self.token = cfg["bot_token"].strip()
         self.poll_s = float(cfg.get("poll_seconds", 2.0))
+        self.listable_sql = _listable_child_sql(hermes_home)
 
         # cwd (normalized) -> channel_id
         self.cwd_to_channel: Dict[str, str] = {}
@@ -146,6 +181,90 @@ class Mirror:
             )
         except Exception as e:
             log.debug("cursor save failed: %s", e)
+
+    # ---- deletion sync --------------------------------------------------
+
+    def _sweep_deletions(self) -> None:
+        """Keep threads and sessions in step: delete one side, the other follows.
+
+        Both directions are polled rather than evented: Discord's THREAD_DELETE
+        arrives on the WebSocket, which the gateway owns, and Hermes has no
+        deletion hook. One pass a minute over the mapped threads is cheap enough
+        (~1 REST call each) and self-heals whatever was missed while we were down.
+
+        ponytail: O(threads) REST calls per sweep; batch via
+        GET /guilds/{id}/threads/active if this ever gets slow.
+        """
+        if not self.session_threads:
+            return
+        live = self._live_session_ids(list(self.session_threads))
+        changed = False
+        for sid, tid in list(self.session_threads.items()):
+            if sid not in live:
+                # Session gone from Hermes -> remove its Discord thread.
+                if self._delete_thread(tid):
+                    log.info("session %s deleted -> removed thread %s", sid, tid)
+                self.session_threads.pop(sid, None)
+                changed = True
+            elif self._thread_missing(tid):
+                # Thread gone from Discord -> delete the Hermes session.
+                self._delete_session(sid)
+                self.session_threads.pop(sid, None)
+                changed = True
+        if changed:
+            self._save_thread_map()
+
+    def _live_session_ids(self, ids: List[str]) -> set:
+        """Which of *ids* still exist as mirror-worthy sessions.
+
+        A session that stops being listable (archived in Desktop) counts as gone,
+        so archiving cleans the channel up the same way deleting does.
+        """
+        out: set = set()
+        conn = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
+        try:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                rows = conn.execute(
+                    f"SELECT s.id FROM sessions s WHERE s.id IN ({_sql_placeholders(chunk)}) "
+                    f"AND s.archived = 0 AND {self.listable_sql} "
+                    f"AND LOWER(COALESCE(s.source,'')) NOT IN ({_sql_placeholders(_DENY_SOURCES)})",
+                    (*chunk, *_DENY_SOURCES),
+                ).fetchall()
+                out.update(r[0] for r in rows)
+        finally:
+            conn.close()
+        return out
+
+    def _thread_missing(self, thread_id: str) -> bool:
+        """True only on a definite 404 — a network blip must not delete a session."""
+        try:
+            return self.http.get(f"{DISCORD_API}/channels/{thread_id}", timeout=15).status_code == 404
+        except Exception as e:
+            log.debug("thread probe failed for %s: %s", thread_id, e)
+            return False
+
+    def _delete_thread(self, thread_id: str) -> bool:
+        try:
+            r = self.http.delete(f"{DISCORD_API}/channels/{thread_id}", timeout=15)
+            return r.ok or r.status_code == 404
+        except Exception as e:
+            log.warning("thread delete failed for %s: %s", thread_id, e)
+            return False
+
+    def _delete_session(self, session_id: str) -> None:
+        """Delete via Hermes's own CLI: it cascades messages, FTS and routing rows."""
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "hermes_cli.main", "sessions", "delete", session_id, "--yes"],
+                cwd=str(self.hermes_home / "hermes-agent"), capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode:
+                log.warning("session delete failed for %s: %s", session_id, (proc.stderr or "").strip()[:300])
+            else:
+                log.info("thread gone -> deleted session %s", session_id)
+        except Exception as e:
+            log.warning("session delete errored for %s: %s", session_id, e)
 
     # ---- project / cwd resolution --------------------------------------
 
@@ -382,12 +501,16 @@ class Mirror:
         ``chat_id`` is selected alongside ``cwd`` so a session with no cwd (one
         created before channel routing existed, or whose channel was mapped
         later) can still be matched by its Discord channel.
+
+        Only sessions the Desktop itself lists are mirrored: subagent runs and
+        machine sources are real rows here, and threading each one made the
+        channel unusable.
         """
         conn = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
-                """
+                f"""
                 SELECT m.id, m.session_id, m.role, m.content, m.timestamp,
                        m.platform_message_id, s.source, s.cwd, s.chat_id
                 FROM messages m
@@ -396,10 +519,13 @@ class Mirror:
                   AND m.role IN ('user','assistant')
                   AND m.active = 1
                   AND COALESCE(m.content,'') <> ''
+                  AND {self.listable_sql}
+                  AND s.archived = 0
+                  AND LOWER(COALESCE(s.source,'')) NOT IN ({_sql_placeholders(_DENY_SOURCES)})
                 ORDER BY m.id ASC
                 LIMIT 200
                 """,
-                (self.cursor,),
+                (self.cursor, *_DENY_SOURCES),
             ).fetchall()
         finally:
             conn.close()
@@ -489,8 +615,12 @@ class Mirror:
             log.info("first run: starting at messages.id=%d (no backfill)", self.cursor)
 
         log.info("watching %s | %d channel mapping(s)", self.state_db, len(self.cwd_to_channel))
+        next_sweep = 0.0
         while True:
             try:
+                if time.time() >= next_sweep:
+                    self._sweep_deletions()
+                    next_sweep = time.time() + _SWEEP_SECONDS
                 turns = self._fetch_new_turns()
                 for t in turns:
                     self.cursor = max(self.cursor, int(t["id"]))
