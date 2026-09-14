@@ -59,6 +59,7 @@ def _mirror(home: Path) -> dm.Mirror:
     m.listable_sql = dm._listable_child_sql(HERMES_HOME)
     m.cursor, m.session_threads = 0, {}
     m.thread_map_path = home / "threads.json"
+    m._guild_cache = ""  # no guild -> idle-archive pass is a no-op in tests
     m.cwd_to_channel = {dm.Mirror._norm("C:/proj"): "CH"}
     return m
 
@@ -95,6 +96,19 @@ def demo():
     m.http = Boom(dead=set())
     m._sweep_deletions()
     assert calls == [] and m.session_threads == {"root": "T_ROOT"}
+
+    # 5. Idle picker: only unarchived, in-channel, stale threads are selected.
+    def tid(days_ago): return str((int((dm.time.time() - days_ago * 86400) * 1000) - 1420070400000) << 22)
+    threads = [
+        {"id": tid(10), "parent_id": "CH", "last_message_id": tid(10), "thread_metadata": {}},
+        {"id": tid(10), "parent_id": "OTHER", "last_message_id": tid(10), "thread_metadata": {}},
+        {"id": tid(10), "parent_id": "CH", "last_message_id": tid(10), "thread_metadata": {"archived": True}},
+        {"id": tid(1), "parent_id": "CH", "last_message_id": tid(1), "thread_metadata": {}},
+        {"id": tid(9), "parent_id": "CH", "last_message_id": None, "thread_metadata": {}},  # empty, uses id
+    ]
+    cutoff = dm.time.time() - dm._IDLE_ARCHIVE_DAYS * 86400
+    picked = dm._idle_thread_ids(threads, {"CH"}, cutoff)
+    assert picked == [threads[0]["id"], threads[4]["id"]], picked
     print("ok")
 
 

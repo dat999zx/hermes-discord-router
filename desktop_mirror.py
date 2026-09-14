@@ -68,6 +68,31 @@ _SWEEP_SECONDS = 60.0
 _DENY_SOURCES = ("cron", "kanban", "tool", "subagent")
 
 
+# Threads idle this long get Discord's archive flag: out of the channel list,
+# still searchable, and posting in one revives it. Discord's own
+# auto_archive_duration no longer flips `archived`, so we set it ourselves.
+_IDLE_ARCHIVE_DAYS = 3.0
+
+
+def _snowflake_epoch(sid: str) -> float:
+    """Creation time of a Discord ID, in seconds."""
+    return ((int(sid) >> 22) + 1420070400000) / 1000.0
+
+
+def _idle_thread_ids(threads: List[dict], channels, cutoff: float) -> List[str]:
+    """Unarchived threads under *channels* whose last message predates *cutoff*."""
+    out = []
+    for t in threads:
+        if str(t.get("parent_id")) not in channels:
+            continue
+        if t.get("thread_metadata", {}).get("archived") or t.get("thread_metadata", {}).get("locked"):
+            continue
+        last = t.get("last_message_id") or t.get("id")
+        if _snowflake_epoch(str(last)) < cutoff:
+            out.append(str(t["id"]))
+    return out
+
+
 def _listable_child_sql(hermes_home: Path) -> str:
     """Hermes's own "is this a conversation a human sees" predicate, for `sessions s`.
 
@@ -140,6 +165,7 @@ class Mirror:
 
         # chat_id -> mapped parent channel (or None). Avoids a REST call per turn.
         self._parent_cache: Dict[str, Optional[str]] = {}
+        self._guild_cache: Optional[str] = None
 
         # last mirrored messages.id (cursor), persisted
         self.cursor_path = hermes_home / "desktop_mirror_cursor.json"
@@ -213,6 +239,45 @@ class Mirror:
                 changed = True
         if changed:
             self._save_thread_map()
+        self._archive_idle_threads()
+
+    def _archive_idle_threads(self) -> None:
+        """Fold threads nobody has touched in _IDLE_ARCHIVE_DAYS out of the sidebar.
+
+        Deletion sync only retires threads whose session is gone; a channel still
+        fills up with finished-but-live conversations. Archiving (not deleting)
+        keeps the history and un-archives itself on the next message, so the
+        session stays mirrored either way.
+        """
+        gid = self._guild_id()
+        if not gid:
+            return
+        try:
+            r = self.http.get(f"{DISCORD_API}/guilds/{gid}/threads/active", timeout=15)
+            if not r.ok:
+                return
+            threads = r.json().get("threads", [])
+        except Exception as e:
+            log.debug("active-thread listing failed: %s", e)
+            return
+        cutoff = time.time() - _IDLE_ARCHIVE_DAYS * 86400
+        for tid in _idle_thread_ids(threads, set(self.cwd_to_channel.values()), cutoff):
+            try:
+                if self.http.patch(f"{DISCORD_API}/channels/{tid}",
+                                   data=json.dumps({"archived": True}), timeout=15).ok:
+                    log.info("archived idle thread %s", tid)
+            except Exception as e:
+                log.debug("archive failed for %s: %s", tid, e)
+
+    def _guild_id(self) -> Optional[str]:
+        if self._guild_cache is None and self.cwd_to_channel:
+            try:
+                r = self.http.get(
+                    f"{DISCORD_API}/channels/{next(iter(self.cwd_to_channel.values()))}", timeout=15)
+                self._guild_cache = str(r.json().get("guild_id") or "") if r.ok else ""
+            except Exception:
+                self._guild_cache = ""
+        return self._guild_cache or None
 
     def _live_session_ids(self, ids: List[str]) -> set:
         """Which of *ids* still exist as mirror-worthy sessions.
@@ -461,11 +526,17 @@ class Mirror:
 
     def _send(self, thread_id: str, content: str) -> None:
         # Discord hard limit 2000 chars/message -> chunk.
-        for chunk in self._chunk(content, 1900):
-            self._post(
-                f"{DISCORD_API}/channels/{thread_id}/messages",
-                {"content": chunk},
-            )
+        url = f"{DISCORD_API}/channels/{thread_id}/messages"
+        for i, chunk in enumerate(self._chunk(content, 1900)):
+            if self._post(url, {"content": chunk}) is None and i == 0:
+                # Idle-archived thread: a post is supposed to revive it, but if
+                # the API refused, unarchive explicitly and try once more.
+                try:
+                    self.http.patch(f"{DISCORD_API}/channels/{thread_id}",
+                                    data=json.dumps({"archived": False}), timeout=15)
+                except Exception as e:
+                    log.debug("unarchive failed for %s: %s", thread_id, e)
+                self._post(url, {"content": chunk})
 
     @staticmethod
     def _chunk(text: str, size: int) -> List[str]:
