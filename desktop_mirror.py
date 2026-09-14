@@ -73,6 +73,9 @@ _DENY_SOURCES = ("cron", "kanban", "tool", "subagent")
 # that session again just makes a fresh thread.
 _IDLE_ARCHIVE_DAYS = 3.0
 
+# Message type 18: the "<user> started a thread: <name>" channel notice.
+_THREAD_CREATED = 18
+
 
 def _snowflake_epoch(sid: str) -> float:
     """Creation time of a Discord ID, in seconds."""
@@ -267,6 +270,35 @@ class Mirror:
                     dropped = True
         if dropped:
             self._save_thread_map()
+        self._purge_orphan_notices(chans)
+
+    def _purge_orphan_notices(self, channels) -> None:
+        """Delete 'X started a thread' rows whose thread no longer exists.
+
+        Deleting a thread does NOT remove that system message — the channel
+        keeps a wall of dead links, which is what actually looks like clutter.
+        Doing it here rather than beside the thread delete covers every path,
+        including threads deleted by hand in Discord.
+
+        A live thread's notice carries a ``thread`` object; an orphan's doesn't.
+        That narrows the candidates to a handful, then a 404 confirms before
+        anything is deleted.
+        """
+        for ch in channels:
+            try:
+                r = self.http.get(f"{DISCORD_API}/channels/{ch}/messages?limit=100", timeout=15)
+                if not r.ok:
+                    continue
+                for m in r.json():
+                    if m.get("type") != _THREAD_CREATED or m.get("thread"):
+                        continue
+                    if not self._thread_missing(m["id"]):  # id of a notice IS its thread's id
+                        continue
+                    d = self.http.delete(f"{DISCORD_API}/channels/{ch}/messages/{m['id']}", timeout=15)
+                    if d.ok:
+                        log.info("removed orphan thread notice %s", m["id"])
+            except Exception as e:
+                log.debug("notice purge failed for %s: %s", ch, e)
 
     def _all_threads(self, guild_id: str, channels) -> List[dict]:
         """Active threads plus each channel's archived ones.

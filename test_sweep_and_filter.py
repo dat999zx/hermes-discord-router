@@ -41,13 +41,17 @@ def _db(path: Path):
 
 
 class _FakeResp:
-    def __init__(self, code): self.status_code, self.ok = code, code < 300
+    def __init__(self, code, payload=None): self.status_code, self.ok, self._p = code, code < 300, payload
+    def json(self): return self._p
 
 
 class _FakeHTTP:
     """404 for 'dead' threads, 200 otherwise; records deletes."""
-    def __init__(self, dead): self.dead, self.deleted = dead, []
-    def get(self, url, **kw): return _FakeResp(404 if url.rsplit("/", 1)[-1] in self.dead else 200)
+    def __init__(self, dead, messages=None): self.dead, self.deleted, self.messages = dead, [], messages or []
+    def get(self, url, **kw):
+        if "/messages" in url:
+            return _FakeResp(200, self.messages)
+        return _FakeResp(404 if url.rsplit("/", 1)[-1] in self.dead else 200)
     def delete(self, url, **kw):
         self.deleted.append(url.rsplit("/", 1)[-1])
         return _FakeResp(204)
@@ -121,6 +125,17 @@ def demo():
     assert m.http.deleted == picked, m.http.deleted      # unmapped stale threads go too
     assert m.session_threads == {"other": fresh}, m.session_threads
     assert calls == [], calls
+
+    # 7. Orphan notices: only a type-18 row whose thread 404s is removed.
+    msgs = [
+        {"id": "DEAD", "type": dm._THREAD_CREATED},                             # thread gone -> purge
+        {"id": "LIVE", "type": dm._THREAD_CREATED, "thread": {"id": "LIVE"}},   # thread still there
+        {"id": "GHOST", "type": dm._THREAD_CREATED},                            # probe says alive
+        {"id": "CHAT", "type": 0},                                              # ordinary message
+    ]
+    m.http = _FakeHTTP(dead={"DEAD"}, messages=msgs)
+    m._purge_orphan_notices({"CH"})
+    assert m.http.deleted == ["DEAD"], m.http.deleted
     print("ok")
 
 
