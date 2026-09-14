@@ -97,18 +97,30 @@ def demo():
     m._sweep_deletions()
     assert calls == [] and m.session_threads == {"root": "T_ROOT"}
 
-    # 5. Idle picker: only unarchived, in-channel, stale threads are selected.
+    # 5. Idle picker: stale in-channel threads, archived ones included.
     def tid(days_ago): return str((int((dm.time.time() - days_ago * 86400) * 1000) - 1420070400000) << 22)
     threads = [
-        {"id": tid(10), "parent_id": "CH", "last_message_id": tid(10), "thread_metadata": {}},
-        {"id": tid(10), "parent_id": "OTHER", "last_message_id": tid(10), "thread_metadata": {}},
-        {"id": tid(10), "parent_id": "CH", "last_message_id": tid(10), "thread_metadata": {"archived": True}},
-        {"id": tid(1), "parent_id": "CH", "last_message_id": tid(1), "thread_metadata": {}},
-        {"id": tid(9), "parent_id": "CH", "last_message_id": None, "thread_metadata": {}},  # empty, uses id
+        {"id": tid(10), "parent_id": "CH", "last_message_id": tid(10)},
+        {"id": tid(10), "parent_id": "OTHER", "last_message_id": tid(10)},   # other channel
+        {"id": tid(1), "parent_id": "CH", "last_message_id": tid(1)},        # fresh
+        {"id": tid(9), "parent_id": "CH", "last_message_id": None},          # empty, uses id
     ]
     cutoff = dm.time.time() - dm._IDLE_ARCHIVE_DAYS * 86400
     picked = dm._idle_thread_ids(threads, {"CH"}, cutoff)
-    assert picked == [threads[0]["id"], threads[4]["id"]], picked
+    assert picked == [threads[0]["id"], threads[3]["id"]], picked
+
+    # 6. Deleting an idle thread drops the mapping but NEVER the session:
+    #    a stale mapping would make the next sweep read 404 as "user deleted it".
+    stale, fresh = threads[0]["id"], threads[2]["id"]
+    m.session_threads = {"root": stale, "other": fresh}
+    m._guild_cache, m.http = "G", _FakeHTTP(dead=set())
+    m._all_threads = lambda gid, chans: threads
+    calls[:] = []
+    m._delete_session = calls.append
+    m._delete_idle_threads()
+    assert m.http.deleted == picked, m.http.deleted      # unmapped stale threads go too
+    assert m.session_threads == {"other": fresh}, m.session_threads
+    assert calls == [], calls
     print("ok")
 
 
