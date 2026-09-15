@@ -52,6 +52,9 @@ IS_WINDOWS = os.name == "nt"
 
 POLL_SECONDS = 3.0
 STOP_GRACE_POLLS = 3          # ~9s of "desktop gone" before stopping services
+# Matches UPDATE_MARKER_MAX_AGE_SECONDS in hermes_cli/update_lock.py: a shorter
+# ceiling here would resurrect the gateway under an update Hermes still considers live.
+UPDATE_MARKER_MAX_AGE_SECONDS = 20 * 60
 START_SETTLE_SECONDS = 1.5
 
 LOG_PATH = HERMES_HOME / "logs" / "desktop_supervisor.log"
@@ -310,6 +313,31 @@ def acquire_lock():
 
 # ------------------------------------------------------------------- main
 
+def update_in_progress() -> bool:
+    """True while a Hermes update holds the shared marker.
+
+    Without this the supervisor FIGHTS the updater: `hermes update` stops the
+    gateway, the self-heal loop restarts it within one poll, and the update then
+    aborts with "close other processes" naming the gateway we just respawned.
+
+    Format is Hermes's own (hermes_cli/update_lock.py, mirrored by
+    electron/update-marker.ts): line 1 pid, line 2 epoch start. A dead pid or an
+    age past the ceiling means no live update, so a crashed updater cannot wedge
+    services off forever.
+    """
+    try:
+        lines = (HERMES_HOME / ".hermes-update-in-progress").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    try:
+        pid, started_at = int(lines[0].strip()), float(lines[1].strip())
+    except (IndexError, ValueError):
+        return False
+    if time.time() - started_at > UPDATE_MARKER_MAX_AGE_SECONDS:
+        return False
+    return psutil.pid_exists(pid)
+
+
 def main() -> None:
     _lock = acquire_lock()  # noqa: F841 — held for process lifetime
 
@@ -333,7 +361,12 @@ def main() -> None:
     services_up = bool(gateway_procs())
     log.info("supervisor started (desktop=%s, gateway=%s, mirror=%s)",
              desktop_up, services_up, bool(mirror_procs()))
-    if desktop_up:
+    if update_in_progress():
+        log.info("hermes update already in progress — staying down until it finishes")
+        if services_up:
+            stop_services()
+            services_up = False
+    elif desktop_up:
         start_services()
         services_up = True
     elif services_up:
@@ -342,9 +375,24 @@ def main() -> None:
         services_up = False
 
     missing_polls = 0
+    updating = False
     try:
         while True:
             time.sleep(POLL_SECONDS)
+
+            # Stand down for the whole update: stop our services so the updater
+            # sees a clear field, and never self-heal anything it stops.
+            if update_in_progress():
+                if not updating:
+                    log.info("hermes update in progress — stopping services until it finishes")
+                    stop_services()
+                    services_up = False
+                    updating = True
+                continue
+            if updating:
+                log.info("update finished — resuming")
+                updating = False
+
             up = desktop_running()
 
             if up:
