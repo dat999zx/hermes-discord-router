@@ -52,6 +52,10 @@ IS_WINDOWS = os.name == "nt"
 
 POLL_SECONDS = 3.0
 STOP_GRACE_POLLS = 3          # ~9s of "desktop gone" before stopping services
+# ~15s of "gateway gone" before healing it. The desktop kills the gateway ~1s
+# BEFORE claiming the update marker, so an eager heal beats the marker and makes
+# `hermes update` abort with exit 2. A crashed gateway waits 15s; an update wins.
+GATEWAY_HEAL_POLLS = 5
 # Matches UPDATE_MARKER_MAX_AGE_SECONDS in hermes_cli/update_lock.py: a shorter
 # ceiling here would resurrect the gateway under an update Hermes still considers live.
 UPDATE_MARKER_MAX_AGE_SECONDS = 20 * 60
@@ -174,6 +178,12 @@ def suppress_hermes_autostart() -> None:
 def start_gateway() -> None:
     if gateway_procs():
         log.info("gateway already running")
+        return
+    # Last-moment re-check: the marker may have appeared since the poll decided
+    # to heal. Guarding HERE covers every caller, so no start path can resurrect
+    # the gateway mid-update and make `hermes update` abort with exit 2.
+    if update_in_progress():
+        log.info("hermes update in progress — not starting the gateway")
         return
     log.info("starting gateway")
     try:
@@ -375,6 +385,7 @@ def main() -> None:
         services_up = False
 
     missing_polls = 0
+    gateway_missing_polls = 0
     updating = False
     try:
         while True:
@@ -403,9 +414,22 @@ def main() -> None:
                     services_up = True
                 else:
                     # Self-heal a service that died on its own.
-                    if not gateway_procs():
-                        log.warning("gateway vanished — restarting")
-                        start_gateway()
+                    #
+                    # The gateway heal is DEBOUNCED because a vanished gateway
+                    # usually means "the desktop is tearing it down to update",
+                    # not "it crashed". The update marker is claimed ~1s AFTER
+                    # that teardown, so an instant respawn wins the race, and the
+                    # updater then aborts (exit 2) naming the process we just
+                    # started. Waiting a few polls lets the marker appear first.
+                    if gateway_procs():
+                        gateway_missing_polls = 0
+                    else:
+                        gateway_missing_polls += 1
+                        if gateway_missing_polls >= GATEWAY_HEAL_POLLS:
+                            log.warning("gateway gone for %.0fs — restarting",
+                                        GATEWAY_HEAL_POLLS * POLL_SECONDS)
+                            start_gateway()
+                            gateway_missing_polls = 0
                     if not mirror_procs():
                         log.warning("mirror vanished — restarting")
                         start_mirror()
