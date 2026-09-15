@@ -374,11 +374,20 @@ class Mirror:
             return False
 
     def _delete_session(self, session_id: str) -> None:
-        """Delete via Hermes's own CLI: it cascades messages, FTS and routing rows."""
+        """Delete via Hermes's own CLI: it cascades messages, FTS and routing rows.
+
+        Runs on HERMES's venv python, not ours: this process deliberately runs on
+        its own venv (so it never blocks `hermes update`), and that interpreter
+        cannot import hermes_cli.
+        """
+        agent = self.hermes_home / "hermes-agent"
+        py = agent / "venv" / "Scripts" / "python.exe"
+        if not py.exists():
+            py = agent / "venv" / "bin" / "python"
         try:
             proc = subprocess.run(
-                [sys.executable, "-m", "hermes_cli.main", "sessions", "delete", session_id, "--yes"],
-                cwd=str(self.hermes_home / "hermes-agent"), capture_output=True, text=True, timeout=120,
+                [str(py), "-m", "hermes_cli.main", "sessions", "delete", session_id, "--yes"],
+                cwd=str(agent), capture_output=True, text=True, timeout=120,
             )
             if proc.returncode:
                 log.warning("session delete failed for %s: %s", session_id, (proc.stderr or "").strip()[:300])

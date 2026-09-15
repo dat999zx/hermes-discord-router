@@ -37,7 +37,14 @@ import psutil
 
 REPO_DIR = Path(__file__).resolve().parent
 HERMES_HOME = Path(os.environ.get("LOCALAPPDATA", "")) / "hermes"
-VENV_PY = HERMES_HOME / "hermes-agent" / "venv" / "Scripts" / "python.exe"
+# Hermes's venv python, used ONLY for short-lived `hermes ...` CLI calls.
+HERMES_PY = HERMES_HOME / "hermes-agent" / "venv" / "Scripts" / "python.exe"
+# Our OWN long-running processes must not run on Hermes's venv: `hermes update`
+# refuses to start while anything holds that venv's native .pyd files, so the
+# supervisor and mirror counted as blockers and made every update abort.
+VENV_PY = REPO_DIR / ".venv" / "Scripts" / "python.exe"
+if not VENV_PY.exists():
+    VENV_PY = HERMES_PY
 MIRROR_PY = REPO_DIR / "desktop_mirror.py"
 
 DESKTOP_PROCESS_NAMES = {"hermes.exe"}
@@ -168,7 +175,7 @@ def start_gateway() -> None:
     log.info("starting gateway")
     try:
         subprocess.run(
-            [str(VENV_PY), "-m", "hermes_cli.main", "gateway", "start"],
+            [str(HERMES_PY), "-m", "hermes_cli.main", "gateway", "start"],
             cwd=str(HERMES_HOME), env=_hermes_env(),
             capture_output=True, text=True, timeout=180,
             creationflags=CREATE_NO_WINDOW,
@@ -186,7 +193,7 @@ def stop_gateway() -> None:
     log.info("stopping gateway")
     try:
         subprocess.run(
-            [str(VENV_PY), "-m", "hermes_cli.main", "gateway", "stop"],
+            [str(HERMES_PY), "-m", "hermes_cli.main", "gateway", "stop"],
             cwd=str(HERMES_HOME), env=_hermes_env(),
             capture_output=True, text=True, timeout=120,
             creationflags=CREATE_NO_WINDOW,

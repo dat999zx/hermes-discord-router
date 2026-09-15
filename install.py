@@ -27,6 +27,7 @@ import sys
 import shutil
 import argparse
 import platform
+import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
@@ -212,15 +213,33 @@ def print_gateway_config(channels: list[tuple[str, str]]) -> None:
 
 # ---------------------------------------------------------------- autostart
 
+def ensure_own_venv() -> Path:
+    """Create the repo's own venv and return its pythonw (falling back to python).
+
+    The services must NOT run on Hermes's venv: `hermes update` refuses to start
+    while any process holds that venv's native .pyd files, so a supervisor and
+    mirror living there made every update abort with "another Hermes process is
+    using this installation".
+    """
+    venv = REPO / ".venv"
+    scripts = venv / ("Scripts" if IS_WINDOWS else "bin")
+    py = scripts / ("python.exe" if IS_WINDOWS else "python")
+    if not py.exists():
+        print("  creating the repo's own venv (keeps `hermes update` unblocked)")
+        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+    subprocess.run([str(py), "-m", "pip", "install", "-q", "-r", str(REPO / "requirements.txt")],
+                   check=True)
+    pyw = scripts / "pythonw.exe"
+    return pyw if pyw.exists() else py
+
+
 def install_autostart(home: Path) -> None:
     if not IS_WINDOWS:
         print("  autostart: only wired for Windows; on macOS/Linux run "
               "`python desktop_supervisor.py` from your session manager")
         return
     startup = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup"
-    pyw = agent_dir(home) / "venv" / "Scripts" / "pythonw.exe"
-    if not pyw.exists():
-        pyw = Path(sys.executable)
+    pyw = ensure_own_venv()
     vbs = startup / "Hermes_Desktop_Supervisor.vbs"
     vbs.write_text(
         "Option Explicit\n"
@@ -369,7 +388,7 @@ def main() -> None:
     print("  2. Ensure DISCORD_BOT_TOKEN is in your Hermes .env")
     print("  3. hermes gateway restart")
     print("  4. Start the supervisor now (or just log out/in):")
-    print(f"     {venv_python(home)} {REPO / 'desktop_supervisor.py'}")
+    print(f"     {REPO / '.venv' / 'Scripts' / 'python.exe'} {REPO / 'desktop_supervisor.py'}")
 
 
 if __name__ == "__main__":
