@@ -213,23 +213,28 @@ def print_gateway_config(channels: list[tuple[str, str]]) -> None:
 
 # ---------------------------------------------------------------- autostart
 
-def ensure_own_venv() -> Path:
-    """Create the repo's own venv and return its pythonw (falling back to python).
+def ensure_service_python() -> Path:
+    """Return the pythonw the services should run on, deps installed.
 
-    The services must NOT run on Hermes's venv: `hermes update` refuses to start
-    while any process holds that venv's native .pyd files, so a supervisor and
-    mirror living there made every update abort with "another Hermes process is
-    using this installation".
+    NOT Hermes's venv: `hermes update` refuses to start while any process holds
+    that venv's native .pyd files, so a supervisor and mirror living there made
+    every update abort with "another Hermes process is using this installation".
+
+    NOT a venv of our own either: a venv is a shim over a base interpreter, and
+    deleting that base (an uninstalled miniconda, here) breaks every launch with
+    "did not find executable at ...\\pythonw.exe". Requirements are three pure
+    packages, so `pip install --user` on a system Python needs no venv at all.
     """
-    venv = REPO / ".venv"
-    scripts = venv / ("Scripts" if IS_WINDOWS else "bin")
-    py = scripts / ("python.exe" if IS_WINDOWS else "python")
-    if not py.exists():
-        print("  creating the repo's own venv (keeps `hermes update` unblocked)")
-        subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
-    subprocess.run([str(py), "-m", "pip", "install", "-q", "-r", str(REPO / "requirements.txt")],
-                   check=True)
-    pyw = scripts / "pythonw.exe"
+    py = Path(os.environ.get("ROUTER_PYTHON") or sys.executable)
+    if "hermes" in str(py).lower():
+        raise SystemExit(
+            f"refusing to install services onto Hermes's own python ({py}).\n"
+            "  Re-run with a system Python, e.g.:\n"
+            "    py -m install.py       (or set ROUTER_PYTHON=<path to python.exe>)")
+    subprocess.run([str(py), "-m", "pip", "install", "--user", "-q",
+                    "-r", str(REPO / "requirements.txt")], check=True)
+    print(f"  services will run on {py}")
+    pyw = py.with_name("pythonw.exe")
     return pyw if pyw.exists() else py
 
 
@@ -239,7 +244,7 @@ def install_autostart(home: Path) -> None:
               "`python desktop_supervisor.py` from your session manager")
         return
     startup = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup"
-    pyw = ensure_own_venv()
+    pyw = ensure_service_python()
     vbs = startup / "Hermes_Desktop_Supervisor.vbs"
     vbs.write_text(
         "Option Explicit\n"
@@ -388,7 +393,7 @@ def main() -> None:
     print("  2. Ensure DISCORD_BOT_TOKEN is in your Hermes .env")
     print("  3. hermes gateway restart")
     print("  4. Start the supervisor now (or just log out/in):")
-    print(f"     {REPO / '.venv' / 'Scripts' / 'python.exe'} {REPO / 'desktop_supervisor.py'}")
+    print(f"     {sys.executable} {REPO / 'desktop_supervisor.py'}")
 
 
 if __name__ == "__main__":

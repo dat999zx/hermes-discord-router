@@ -39,12 +39,38 @@ REPO_DIR = Path(__file__).resolve().parent
 HERMES_HOME = Path(os.environ.get("LOCALAPPDATA", "")) / "hermes"
 # Hermes's venv python, used ONLY for short-lived `hermes ...` CLI calls.
 HERMES_PY = HERMES_HOME / "hermes-agent" / "venv" / "Scripts" / "python.exe"
-# Our OWN long-running processes must not run on Hermes's venv: `hermes update`
-# refuses to start while anything holds that venv's native .pyd files, so the
-# supervisor and mirror counted as blockers and made every update abort.
-VENV_PY = REPO_DIR / ".venv" / "Scripts" / "python.exe"
-if not VENV_PY.exists():
-    VENV_PY = HERMES_PY
+
+
+def _own_python() -> Path:
+    """A system Python to run OUR long-running services on.
+
+    Two constraints, both learned the hard way:
+
+    1. NOT Hermes's venv. `hermes update` refuses to start while anything holds
+       that venv's native .pyd files, so services living there blocked every
+       update.
+    2. NOT a venv of our own. A venv is a shim over a base interpreter; delete
+       the base (an uninstalled miniconda, here) and every launch dies with
+       "did not find executable at ...\\pythonw.exe". A real installation has no
+       such second point of failure.
+
+    Requirements are only requests/PyYAML/psutil, so a plain `pip install --user`
+    against a system Python covers it and there is nothing to rebuild.
+    """
+    if (env := os.environ.get("ROUTER_PYTHON")):
+        return Path(env)                       # explicit override wins
+    exe = "python.exe" if os.name == "nt" else "python3"
+    for cand in (
+        Path(sys.executable),                  # however we were started
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Python" / "pythoncore-3.14-64" / exe,
+        Path("D:/MSYS2/ucrt64/bin") / exe,
+    ):
+        if cand.exists() and "hermes" not in str(cand).lower():
+            return cand
+    return HERMES_PY                           # last resort: works, blocks updates
+
+
+VENV_PY = _own_python()
 MIRROR_PY = REPO_DIR / "desktop_mirror.py"
 
 DESKTOP_PROCESS_NAMES = {"hermes.exe"}
