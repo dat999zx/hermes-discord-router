@@ -24,17 +24,19 @@ class _Source:
 
 
 class _Ctx:
-    def __init__(self, chat_id="", parent_chat_id="", session_id=""):
+    def __init__(self, chat_id="", parent_chat_id="", session_id="", session_key=""):
         self.source = _Source(chat_id, parent_chat_id)
         self.session_id = session_id
+        self.session_key = session_key
 
 
-def _make_state_db(home: Path, session_key: str, cwd: str) -> None:
+def _make_state_db(home: Path, session_key: str, cwd: str, chat_id: str = "") -> None:
     conn = sqlite3.connect(str(home / "state.db"))
-    conn.execute("CREATE TABLE sessions (id TEXT, session_key TEXT, cwd TEXT)")
     conn.execute(
-        "INSERT INTO sessions (id, session_key, cwd) VALUES (?, ?, ?)",
-        (session_key, session_key, cwd),
+        "CREATE TABLE sessions (id TEXT, session_key TEXT, chat_id TEXT, cwd TEXT, started_at REAL)")
+    conn.execute(
+        "INSERT INTO sessions (id, session_key, chat_id, cwd, started_at) VALUES (?, ?, ?, ?, 1)",
+        (session_key, session_key, chat_id, cwd),
     )
     conn.commit()
     conn.close()
@@ -45,7 +47,7 @@ def main() -> None:
     proj = "D:/Unity/projects/House Moving Company"
     other = "D:/coding/knowl"
     sess = "agent:main:discord:thread:999:999"
-    _make_state_db(tmp, sess, proj)
+    _make_state_db(tmp, sess, proj, chat_id="999")
     os.environ["HERMES_HOME"] = str(tmp)
 
     # channel 111 -> knowl; the thread 999 and its parent 222 are NOT mapped
@@ -73,10 +75,28 @@ def main() -> None:
     os.environ["DISCORD_CHANNEL_PROJECTS"] = "{not json"
     assert dr.route_discord_channel(_Ctx(chat_id="999", session_id=sess), None) == proj
 
-    # 6. A genuinely unknown session still yields None, so a brand-new session
-    #    keeps Hermes's own default rather than inheriting someone else's project.
-    assert dr.route_discord_channel(_Ctx(chat_id="999", session_id="nope"), None) is None
-    assert dr.route_discord_channel(_Ctx(chat_id="999"), None) is None
+    # 6. A genuinely unknown conversation still yields None, so a brand-new
+    #    session keeps Hermes's own default rather than inheriting someone else's.
+    assert dr.route_discord_channel(_Ctx(chat_id="404", session_id="nope"), None) is None
+    assert dr.route_discord_channel(_Ctx(chat_id="404"), None) is None
+
+    # 7. THE MID-RUN BUG: prompting again while the agent is still running.
+    #    That turn is queued/steered and reaches routing with NO session_id (the
+    #    id is only bound once the row exists) and, depending on the path, no
+    #    parent_chat_id either. Every lookup key but chat_id is therefore empty.
+    #    Before the fix this returned None -> set_session_vars(cwd="") -> the
+    #    live conversation jumped to Home mid-answer.
+    os.environ["DISCORD_CHANNEL_PROJECTS"] = json.dumps({"111": other})
+    assert dr.route_discord_channel(_Ctx(chat_id="999"), None) == proj
+    assert dr.route_discord_channel(_Ctx(chat_id="999", parent_chat_id="222"), None) == proj
+
+    # 8. session_key alone (id not yet assigned) also resolves.
+    assert dr.route_discord_channel(_Ctx(chat_id="", session_key=sess), None) == proj
+
+    # 9. A mapped channel still WINS over the stored cwd — moving a channel to a
+    #    new folder in config.yaml must take effect, not be pinned by history.
+    assert dr.route_discord_channel(
+        _Ctx(chat_id="111", session_id=sess), None) == other
 
     print("all ok")
 
