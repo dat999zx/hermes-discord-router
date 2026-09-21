@@ -54,6 +54,18 @@ REM `hermes gateway start` re-adds Hermes's OWN login item, which would start a
 REM second gateway at boot and fight the supervisor. Strip it again.
 del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Hermes_Gateway.vbs" >nul 2>&1
 
+REM The mirror reads discord.channels ONCE at startup, so a running one holds a
+REM stale channel map -- a newly added channel routes INBOUND but Desktop turns
+REM in that folder never mirror OUT. Kill it; the supervisor respawns it in ~20s
+REM (and the supervisor itself now watches config.yaml for this).
+echo.
+echo Recycling the mirror so it reloads the channel map...
+powershell -NoProfile -Command ^
+  "Get-CimInstance Win32_Process -Filter \"Name like '%%python%%'\" |" ^
+  "  Where-Object { $_.CommandLine -like '*desktop_mirror.py*' } |" ^
+  "  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+ping -n 25 127.0.0.1 >nul
+
 echo.
 echo === Channels the gateway actually loaded ===
 powershell -NoProfile -Command ^

@@ -253,6 +253,21 @@ def stop_gateway() -> None:
             pass
 
 
+def config_channels_mtime() -> float:
+    """mtime of hermes's config.yaml, or 0.0.
+
+    The mirror reads `discord.channels` ONCE at startup and holds the map in
+    memory, so a channel added to config.yaml never reaches a running mirror:
+    the gateway routes the new channel inbound while Desktop turns in that
+    folder silently never mirror out. Restarting the mirror on an mtime change
+    closes that gap without anyone remembering to.
+    """
+    try:
+        return (HERMES_HOME / "config.yaml").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def start_mirror() -> None:
     if mirror_procs():
         log.info("mirror already running")
@@ -413,6 +428,7 @@ def main() -> None:
     missing_polls = 0
     gateway_missing_polls = 0
     updating = False
+    config_mtime = config_channels_mtime()
     try:
         while True:
             time.sleep(POLL_SECONDS)
@@ -439,6 +455,14 @@ def main() -> None:
                     start_services()
                     services_up = True
                 else:
+                    # Config changed (a channel added/repointed): the mirror
+                    # only reads channels at startup, so recycle it.
+                    _mtime = config_channels_mtime()
+                    if _mtime != config_mtime:
+                        log.info("config.yaml changed — restarting mirror to reload channels")
+                        stop_mirror()
+                        start_mirror()
+                        config_mtime = _mtime
                     # Self-heal a service that died on its own.
                     #
                     # The gateway heal is DEBOUNCED because a vanished gateway
