@@ -169,10 +169,31 @@ def apply_patches(home: Path) -> None:
                       "`cwd=_channel_cwd,` to the set_session_vars(...) call")
 
 
+PT_ANCHOR_1 = "    # Snapshot after the model sync: a deferred switch's history mutation belongs to this turn.\n"
+PT_INSERT_1 = ("    from tui_gateway.history_resync import adopt_foreign_writes\n"
+               "    adopt_foreign_writes(session, _session_db)  # rows another process (Discord) appended\n")
+PT_ANCHOR_2 = "            status_note = _commit_turn_history(session, result, st.history, st.history_version)\n"
+PT_INSERT_2 = ("            from tui_gateway.history_resync import record_tail\n"
+               "            record_tail(session, _session_db)\n")
+
+
+def apply_history_resync(home: Path) -> None:
+    """Desktop adopts rows the Discord gateway wrote to the shared session."""
+    tg = agent_dir(home) / "tui_gateway"
+    pt = tg / "prompt_turn.py"
+    if not pt.exists():
+        print("  prompt_turn.py: MISSING -- skipped history resync")
+        return
+    shutil.copy2(Path(__file__).parent / "history_resync.py", tg / "history_resync.py")
+    print("  history_resync.py: copied")
+    print("  prompt_turn.py :", patch_file(pt, "adopt_foreign_writes(session", PT_ANCHOR_1, PT_INSERT_1, after=False))
+    print("  prompt_turn.py :", patch_file(pt, "record_tail(session", PT_ANCHOR_2, PT_INSERT_2))
+
+
 def revert_patches(home: Path) -> None:
     a = agent_dir(home)
     for f in (a / "plugins" / "platforms" / "discord" / "adapter.py",
-              a / "gateway" / "run.py"):
+              a / "gateway" / "run.py", a / "tui_gateway" / "prompt_turn.py"):
         b = f.with_suffix(f.suffix + ".hdr-backup")
         if b.exists():
             shutil.copy2(b, f)
@@ -364,6 +385,7 @@ def main() -> None:
 
     print("\n2) Patching gateway")
     apply_patches(home)
+    apply_history_resync(home)
 
     channels = []
     for spec in args.channel:
