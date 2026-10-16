@@ -135,6 +135,13 @@ process; do a full `hermes gateway stop && hermes gateway start`.
 that isn't a real project; Hermes auto-creates a project from any cwd. Fix the
 `folder:` value and repoint affected sessions.
 
+**Desktop prompts appear twice.** On Hermes versions with native out-of-band
+history adoption, the installer removes this repo's older history-resync hooks.
+Running both reloaded the current submit-time user row into history before Hermes
+added the prompt for the turn. Re-run `python install.py`, then close and reopen
+Desktop so its backend loads the repaired code. Restarting only the Discord gateway
+is not enough. Older Hermes versions still receive the legacy hook.
+
 **Old turns repeat after compression.** The mirror skips retained storage copies
 using their stable `message_uid` when an earlier copy is already behind its saved
 cursor. Separate prompts with the same text still mirror. Restart the mirror after

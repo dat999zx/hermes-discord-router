@@ -184,6 +184,18 @@ def apply_history_resync(home: Path) -> None:
     if not pt.exists():
         print("  prompt_turn.py: MISSING -- skipped history resync")
         return
+    text = pt.read_text(encoding="utf-8")
+    if ("def _adopt_out_of_band_turns(" in text
+            and "\n    _adopt_out_of_band_turns(session)\n" in text):
+        # Native adoption excludes the submit-time user row. Our older reload
+        # includes it, so running both sends the current prompt to the model twice.
+        repaired = text.replace(PT_INSERT_1, "").replace(PT_INSERT_2, "")
+        if repaired != text:
+            pt.write_text(repaired, encoding="utf-8")
+            print("  prompt_turn.py: removed obsolete history hooks; reopen Desktop to activate")
+        else:
+            print("  prompt_turn.py: native history adoption; no extra hooks needed")
+        return
     shutil.copy2(Path(__file__).parent / "history_resync.py", tg / "history_resync.py")
     print("  history_resync.py: copied")
     print("  prompt_turn.py :", patch_file(pt, "adopt_foreign_writes(session", PT_ANCHOR_1, PT_INSERT_1, after=False))
