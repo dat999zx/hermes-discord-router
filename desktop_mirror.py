@@ -15,9 +15,9 @@ Why a separate REST service (not a second gateway client):
   * Desktop and the gateway are separate processes but share state.db. We tail
     the shared DB for Desktop-authored turns instead of hooking into either.
 
-Echo safety: we only mirror sessions whose `source` is a Desktop/local source
-(tui/desktop/webui/local/cli). Gateway-owned Discord sessions are skipped, so a
-mirrored post can never re-trigger a Discord-side agent run.
+Echo safety: origin is checked per turn, not per session, so Desktop prompts in
+Discord-linked sessions still mirror. Retained copies created by compaction are
+skipped using their stable message_uid and the persisted row cursor.
 """
 
 from __future__ import annotations
@@ -639,10 +639,23 @@ class Mirror:
         conn = sqlite3.connect(f"file:{self.state_db}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         try:
+            # Compaction gives retained turns fresh row ids but keeps message_uid.
+            # Only suppress copies whose earlier generation is behind our saved
+            # cursor. An original not consumed yet must still be delivered.
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+            consumed_copy = "0"
+            if "message_uid" in columns:
+                consumed_copy = f"""(NULLIF(m.message_uid, '') IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM messages previous
+                    WHERE previous.session_id = m.session_id
+                      AND previous.message_uid = m.message_uid
+                      AND previous.id <= {int(self.cursor)}
+                      AND previous.id < m.id))"""
             rows = conn.execute(
                 f"""
                 SELECT m.id, m.session_id, m.role, m.content, m.timestamp,
-                       m.platform_message_id, s.source, s.cwd, s.chat_id
+                       m.platform_message_id, s.source, s.cwd, s.chat_id,
+                       {consumed_copy} AS consumed_copy
                 FROM messages m
                 JOIN sessions s ON s.id = m.session_id
                 WHERE m.id > ?
@@ -754,6 +767,8 @@ class Mirror:
                 turns = self._fetch_new_turns()
                 for t in turns:
                     self.cursor = max(self.cursor, int(t["id"]))
+                    if t["consumed_copy"]:
+                        continue  # storage rewrite, not a new conversation turn
                     sid = t["session_id"]
                     role = t["role"]
                     content = t["content"] or ""

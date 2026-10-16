@@ -135,6 +135,12 @@ process; do a full `hermes gateway stop && hermes gateway start`.
 that isn't a real project; Hermes auto-creates a project from any cwd. Fix the
 `folder:` value and repoint affected sessions.
 
+**Old turns repeat after compression.** The mirror skips retained storage copies
+using their stable `message_uid` when an earlier copy is already behind its saved
+cursor. Separate prompts with the same text still mirror. Restart the mirror after
+updating this repo; no Hermes core patch or cursor reset is needed. Older Hermes
+schemas without `message_uid` retain the original row-based behavior.
+
 **Services don't start with the app.** Check `logs/desktop_supervisor.log`.
 
 ## Files
