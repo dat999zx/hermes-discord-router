@@ -77,7 +77,7 @@ powershell -NoProfile -Command ^
 echo.
 echo Done. Verify a channel maps to its folder above, then prompt in Discord.
 echo If Hermes Desktop was open during this repair, close and reopen it once.
-echo The gateway restart does not reload Desktop's history-sync code.
+echo The gateway restart reloads neither Desktop history-sync nor renderer code.
 echo.
 pause
 exit /b 0

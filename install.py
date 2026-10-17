@@ -30,6 +30,8 @@ import platform
 import subprocess
 from pathlib import Path
 
+from desktop_live_refresh import apply_desktop_live_refresh, revert_desktop_live_refresh
+
 REPO = Path(__file__).resolve().parent
 IS_WINDOWS = os.name == "nt"
 
@@ -383,6 +385,7 @@ def main() -> None:
     if args.uninstall:
         print("\nUninstalling...")
         revert_patches(home)
+        revert_desktop_live_refresh(home)
         remove_autostart()
         rp = home / "discord_router.py"
         if rp.exists():
@@ -398,6 +401,7 @@ def main() -> None:
     print("\n2) Patching gateway")
     apply_patches(home)
     apply_history_resync(home)
+    apply_desktop_live_refresh(home)
 
     channels = []
     for spec in args.channel:

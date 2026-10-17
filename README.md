@@ -142,6 +142,20 @@ added the prompt for the turn. Re-run `python install.py`, then close and reopen
 Desktop so its backend loads the repaired code. Restarting only the Discord gateway
 is not enough. Older Hermes versions still receive the legacy hook.
 
+**Desktop only shows Discord turns after reopening.** The installer removes a
+sidebar-cache shortcut from Desktop's tile refresh. A change event could arrive
+before the sidebar list finished refreshing, causing another open pane to skip
+its transcript read. This repair updates both the TypeScript source and recognized
+unpacked packaged-renderer code, preserving the existing transcript-signature and
+live-turn guards. Close and reopen Desktop once after repair; gateway restart alone
+does not reload the renderer. Chat data is not changed. Backups are restored by
+`python install.py --uninstall`; unknown source/bundle shapes are not guessed.
+
+For the optional real Hermes hook regression (requires its installed JS test dependencies):
+`python test_desktop_live_refresh.py --desktop PATH/TO/hermes-agent/apps/desktop`.
+It runs a temporary copy of the upstream background-sync suite with the obsolete
+metadata-shortcut assertion adapted and the delayed-publication regression added.
+
 **Old turns repeat after compression.** The mirror skips retained storage copies
 using their stable `message_uid` when an earlier copy is already behind its saved
 cursor. Separate prompts with the same text still mirror. Restart the mirror after
