@@ -193,3 +193,63 @@ def route_discord_channel(context: Any, session_db: Any) -> Optional[str]:
             pass  # No running loop
     
     return cwd
+
+
+# ------------------------------------------------- Desktop-mirror thread adoption
+# The mirror creates threads over REST and records session_id -> thread_id in
+# desktop_mirror_threads.json. Writing into the gateway's own state files does
+# not work while it runs: the gateway reads discord_threads.json and the routing
+# index once at startup and later overwrites both from memory, erasing the
+# mirror's entries. So the patched gateway asks this map on a miss instead.
+
+_mirror_cache: Dict[str, Any] = {"mtime": None, "by_thread": {}}
+
+
+def mirror_session_for_thread(thread_id: str) -> Optional[str]:
+    """Desktop session id the mirror bound to *thread_id*, or None."""
+    p = _hermes_home() / "desktop_mirror_threads.json"
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return None
+    if mtime != _mirror_cache["mtime"]:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        _mirror_cache["by_thread"] = {str(t): str(s) for s, t in data.items()}
+        _mirror_cache["mtime"] = mtime
+    return _mirror_cache["by_thread"].get(str(thread_id))
+
+
+def adopt_mirror_route(store: Any, session_key: str) -> Any:
+    """On a routing miss for a mirror thread, bind the key to its Desktop session.
+
+    Called by the patched SessionStore with ``store._lock`` held. Returns the new
+    SessionEntry (already placed in ``store._entries``) or None.
+    """
+    parts = session_key.split(":")
+    # agent:main:discord:thread:<chat_id>:<thread_id>
+    if len(parts) != 6 or parts[2:4] != ["discord", "thread"] or parts[4] != parts[5]:
+        return None
+    thread_id = parts[5]
+    session_id = mirror_session_for_thread(thread_id)
+    if not session_id:
+        return None
+    import datetime
+    iso = datetime.datetime.now().isoformat()
+    entry_json = json.dumps({
+        "session_key": session_key, "session_id": session_id,
+        "created_at": iso, "updated_at": iso,
+        "platform": "discord", "chat_type": "thread", "metadata": {},
+        "origin": {"platform": "discord", "chat_id": thread_id,
+                   "chat_type": "thread", "thread_id": thread_id},
+    })
+    entry = store._routing_entry_from_json(session_key, entry_json)
+    if entry is None:
+        return None
+    store._entries[session_key] = entry
+    logger.info("Adopted Desktop-mirror thread %s -> session %s", thread_id, session_id)
+    return entry

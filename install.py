@@ -171,6 +171,51 @@ def apply_patches(home: Path) -> None:
                       "`cwd=_channel_cwd,` to the set_session_vars(...) call")
 
 
+# Desktop-mirror threads: admit unmentioned replies and route them to the
+# Desktop session, without a gateway restart (lookups go to discord_router).
+HDR_IMPORT = (
+    "        import sys as _hdr_sys\n"
+    "        _hdr_home = os.environ.get(\"HERMES_HOME\") or os.path.join(\n"
+    "            os.environ.get(\"LOCALAPPDATA\") or os.path.join(os.path.expanduser(\"~\"), \".local\", \"share\"),\n"
+    "            \"hermes\")\n"
+    "        if _hdr_home not in _hdr_sys.path:\n"
+    "            _hdr_sys.path.insert(0, _hdr_home)\n"
+)
+MIRROR_ADAPTER_ANCHOR = '        thread_require_mention (multi-bot threads) gates threads like channels."""\n'
+MIRROR_ADAPTER_MARKER = "# hermes-discord-router: mirror threads are bot threads"
+MIRROR_ADAPTER_PATCH = (
+    "        # hermes-discord-router: mirror threads are bot threads\n"
+    "        try:\n"
+    "            _hdr_tid = str(message.channel.id)\n"
+    "            if isinstance(message.channel, discord.Thread) and _hdr_tid not in self._threads:\n"
+    + HDR_IMPORT.replace("        ", "                ", 1).replace("\n        ", "\n                ") +
+    "                from discord_router import mirror_session_for_thread\n"
+    "                if mirror_session_for_thread(_hdr_tid):\n"
+    "                    self._threads._remember(_hdr_tid)\n"
+    "        except Exception as _hdr_e:\n"
+    "            logger.debug(\"mirror-thread check failed: %s\", _hdr_e)\n"
+)
+MIRROR_SESSION_ANCHOR = "            observed = self._entries.get(session_key)\n"
+MIRROR_SESSION_MARKER = "# hermes-discord-router: adopt mirror thread"
+MIRROR_SESSION_PATCH = (
+    "            if observed is None and not force_new:  # hermes-discord-router: adopt mirror thread\n"
+    "                try:\n"
+    + HDR_IMPORT.replace("        ", "                    ", 1).replace("\n        ", "\n                    ") +
+    "                    from discord_router import adopt_mirror_route\n"
+    "                    observed = adopt_mirror_route(self, session_key)\n"
+    "                except Exception as _hdr_e:\n"
+    "                    logger.debug(\"mirror-route adopt failed: %s\", _hdr_e)\n"
+)
+
+
+def apply_mirror_patches(home: Path) -> None:
+    a = agent_dir(home)
+    adapter = a / "plugins" / "platforms" / "discord" / "adapter.py"
+    session = a / "gateway" / "session.py"
+    print("  adapter.py :", patch_file(adapter, MIRROR_ADAPTER_MARKER, MIRROR_ADAPTER_ANCHOR, MIRROR_ADAPTER_PATCH))
+    print("  session.py :", patch_file(session, MIRROR_SESSION_MARKER, MIRROR_SESSION_ANCHOR, MIRROR_SESSION_PATCH))
+
+
 PT_ANCHOR_1 = "    # Snapshot after the model sync: a deferred switch's history mutation belongs to this turn.\n"
 PT_INSERT_1 = ("    from tui_gateway.history_resync import adopt_foreign_writes\n"
                "    adopt_foreign_writes(session, _session_db)  # rows another process (Discord) appended\n")
@@ -207,7 +252,8 @@ def apply_history_resync(home: Path) -> None:
 def revert_patches(home: Path) -> None:
     a = agent_dir(home)
     for f in (a / "plugins" / "platforms" / "discord" / "adapter.py",
-              a / "gateway" / "run.py", a / "tui_gateway" / "prompt_turn.py"):
+              a / "gateway" / "run.py", a / "gateway" / "session.py",
+              a / "tui_gateway" / "prompt_turn.py"):
         b = f.with_suffix(f.suffix + ".hdr-backup")
         if b.exists():
             shutil.copy2(b, f)
@@ -400,6 +446,7 @@ def main() -> None:
 
     print("\n2) Patching gateway")
     apply_patches(home)
+    apply_mirror_patches(home)
     apply_history_resync(home)
     apply_desktop_live_refresh(home)
 
