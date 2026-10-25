@@ -47,9 +47,13 @@ def _no_start_during_update(home: Path):
     """
     spawned = []
     real_run, real_procs = subprocess.run, ds.gateway_procs
+    real_suppress = ds.suppress_hermes_autostart
     try:
         subprocess.run = lambda *a, **k: spawned.append(a)
         ds.gateway_procs = lambda: []                 # gateway is down
+        # start_gateway() ends by deleting the REAL Startup\Hermes_Gateway.vbs;
+        # running this test once silently killed the gateway's login autostart.
+        ds.suppress_hermes_autostart = lambda: None
 
         _write(home, os.getpid(), time.time())        # marker appeared meanwhile
         ds.start_gateway()
@@ -60,6 +64,7 @@ def _no_start_during_update(home: Path):
         assert spawned, "must still heal a genuinely crashed gateway"
     finally:
         subprocess.run, ds.gateway_procs = real_run, real_procs
+        ds.suppress_hermes_autostart = real_suppress
 
 
 if __name__ == "__main__":
