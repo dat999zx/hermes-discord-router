@@ -389,6 +389,71 @@ def update_in_progress() -> bool:
     return psutil.pid_exists(pid)
 
 
+# --------------------------------------------------------------- self-repair
+
+REPAIR_CHECK_SECONDS = 60.0
+
+
+def patches_missing() -> list:
+    """Router patches/modules a `hermes update` wiped (empty when all present)."""
+    try:
+        if str(REPO_DIR) not in sys.path:
+            sys.path.insert(0, str(REPO_DIR))
+        import importlib
+        import install
+        install = importlib.reload(install)  # a `git pull` of the router changes the expectations
+        return install.missing_patches(HERMES_HOME)
+    except Exception as e:
+        log.debug("patch check failed: %s", e)
+        return []
+
+
+def repair_patches(missing: list) -> bool:
+    """Re-run the idempotent installer non-interactively; True when nothing is left missing."""
+    log.warning("router patches missing after a Hermes update (%s) — re-applying", ", ".join(missing))
+    try:
+        r = subprocess.run(
+            [str(VENV_PY), str(REPO_DIR / "install.py"), "--repair"],
+            cwd=str(REPO_DIR), env={**os.environ, "HERMES_HOME": str(HERMES_HOME)},
+            capture_output=True, text=True, timeout=180, creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception as e:
+        log.error("repair failed to run: %s", e)
+        return False
+    if r.returncode != 0:
+        log.error("repair incomplete (Hermes moved the code a patch anchors to?):\n%s",
+                  (r.stdout or "")[-1500:] + (r.stderr or "")[-500:])
+        return False
+    log.info("router patches re-applied")
+    return True
+
+
+def restart_gateway_after_repair() -> None:
+    """A running gateway imported the unpatched modules; restart it to load the patches."""
+    if not gateway_procs():
+        return
+    stop_gateway()
+    time.sleep(START_SETTLE_SECONDS)
+    start_gateway()
+
+
+def self_repair(state: dict) -> None:
+    """Re-apply wiped patches, at most once per distinct breakage (no retry spam)."""
+    missing = patches_missing()
+    if not missing:
+        state.pop("failed", None)
+        return
+    if state.get("failed") == missing:
+        return
+    if repair_patches(missing):
+        state.pop("failed", None)
+        restart_gateway_after_repair()
+        if desktop_running():
+            log.info("Desktop picks up its patches the next time it is reopened")
+    else:
+        state["failed"] = missing
+
+
 def main() -> None:
     _lock = acquire_lock()  # noqa: F841 — held for process lifetime
 
@@ -428,6 +493,8 @@ def main() -> None:
     missing_polls = 0
     gateway_missing_polls = 0
     updating = False
+    repair_state: dict = {}
+    next_repair_check = 0.0
     config_mtime = config_channels_mtime()
     try:
         while True:
@@ -445,6 +512,13 @@ def main() -> None:
             if updating:
                 log.info("update finished — resuming")
                 updating = False
+                next_repair_check = 0.0  # re-patch right away, not up to a minute later
+
+            # An update resets the hermes-agent tree and silently drops every
+            # router patch; put them back without the user running anything.
+            if time.time() >= next_repair_check:
+                next_repair_check = time.time() + REPAIR_CHECK_SECONDS
+                self_repair(repair_state)
 
             up = desktop_running()
 
