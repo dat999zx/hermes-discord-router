@@ -139,7 +139,10 @@ def patch_file(path: Path, marker: str, anchor: str, insert: str, *, after=True)
     if anchor not in text:
         return f"ANCHOR NOT FOUND -- patch manually (looked for: {anchor[:60]!r})"
     backup = path.with_suffix(path.suffix + ".hdr-backup")
-    if not backup.exists():
+    # No router marker at all = a pristine file (fresh install, or a `hermes update`
+    # reset it). A backup left from before the update would restore OLD Hermes
+    # code on --uninstall, so refresh it.
+    if not backup.exists() or not any(m in text for m in _router_markers()):
         backup.write_text(text, encoding="utf-8")
     text = text.replace(anchor, (anchor + insert) if after else (insert + anchor), 1)
     path.write_text(text, encoding="utf-8")
@@ -249,10 +252,87 @@ def apply_history_resync(home: Path) -> None:
     print("  prompt_turn.py :", patch_file(pt, "record_tail(session", PT_ANCHOR_2, PT_INSERT_2))
 
 
+def _model_sync_hook(indent: str, call: str) -> str:
+    """A turn-start call into HERMES_HOME/model_sync.py that can never break the turn."""
+    body = [
+        "try:  # hermes-discord-router: model sync",
+        "    import os as _hdr_os, sys as _hdr_sys",
+        "    _hdr_home = _hdr_os.environ.get(\"HERMES_HOME\") or _hdr_os.path.join(",
+        "        _hdr_os.environ.get(\"LOCALAPPDATA\") or _hdr_os.path.join(_hdr_os.path.expanduser(\"~\"), \".local\", \"share\"),",
+        "        \"hermes\")",
+        "    if _hdr_home not in _hdr_sys.path:",
+        "        _hdr_sys.path.insert(0, _hdr_home)",
+        f"    from model_sync import {call.split('(')[0]}",
+        f"    {call}",
+        "except ImportError:",
+        "    pass",
+    ]
+    return "".join(f"{indent}{line}\n" for line in body)
+
+
+MODEL_SYNC_MARKER = "# hermes-discord-router: model sync"
+# Gateway: right after a persisted /model override is rehydrated, before it is read.
+RT_ANCHOR = "            self._rehydrate_session_model_override(skey)\n"
+RT_INSERT = _model_sync_hook("            ", "adopt_desktop_switch(self, skey)")
+# Desktop: right after the config-model sync, inside the "no /model --once active" guard.
+PT_SYNC_ANCHOR = "        _sync_agent_model_with_config(sid, session)\n"
+PT_SYNC_INSERT = _model_sync_hook("        ", "adopt_gateway_switch(sid, session)")
+
+
+def apply_model_sync(home: Path) -> None:
+    """One model per session: a /model on Desktop reaches Discord and vice versa."""
+    shutil.copy2(REPO / "model_sync.py", home / "model_sync.py")
+    print(f"  -> {home / 'model_sync.py'}")
+    a = agent_dir(home)
+    for f, anchor, insert in ((a / "gateway" / "run_turn.py", RT_ANCHOR, RT_INSERT),
+                              (a / "tui_gateway" / "prompt_turn.py", PT_SYNC_ANCHOR, PT_SYNC_INSERT)):
+        if not f.exists():
+            print(f"  {f.name}: MISSING -- skipped model sync")
+            continue
+        print(f"  {f.name} :", patch_file(f, MODEL_SYNC_MARKER, anchor, insert))
+
+
+def _router_markers() -> tuple[str, ...]:
+    """Every string the router's patches leave behind (history hooks included)."""
+    return (ADAPTER_MARKER, RUN_MARKER, MIRROR_ADAPTER_MARKER, MIRROR_SESSION_MARKER,
+            MODEL_SYNC_MARKER, "adopt_foreign_writes(session", "record_tail(session")
+
+
+def missing_patches(home: Path) -> list[str]:
+    """Patched Hermes files whose router hook is gone. Every `hermes update`
+    resets the hermes-agent tree, which silently drops all of these.
+
+    The history-resync hooks are not listed: they are intentionally absent on
+    Hermes builds that adopt foreign turns natively.
+    """
+    a = agent_dir(home)
+    expected = [
+        (a / "plugins" / "platforms" / "discord" / "adapter.py", ADAPTER_MARKER),
+        (a / "plugins" / "platforms" / "discord" / "adapter.py", MIRROR_ADAPTER_MARKER),
+        (a / "gateway" / "run.py", RUN_MARKER),
+        (a / "gateway" / "session.py", MIRROR_SESSION_MARKER),
+        (a / "gateway" / "run_turn.py", MODEL_SYNC_MARKER),
+        (a / "tui_gateway" / "prompt_turn.py", MODEL_SYNC_MARKER),
+    ]
+    missing = []
+    for f, marker in expected:
+        try:
+            if marker not in f.read_text(encoding="utf-8"):
+                missing.append(f"{f.name}:{marker.lstrip('# ')[:40]}")
+        except OSError:
+            missing.append(f"{f.name}:file missing")
+    for module in ("discord_router.py", "model_sync.py"):
+        installed, source = home / module, REPO / module
+        if not installed.exists() or installed.read_bytes() != source.read_bytes():
+            missing.append(f"{module}:stale")
+    return missing
+
+
 def revert_patches(home: Path) -> None:
     a = agent_dir(home)
     for f in (a / "plugins" / "platforms" / "discord" / "adapter.py",
               a / "gateway" / "run.py", a / "gateway" / "session.py",
+              a / "gateway" / "run_turn.py",
               a / "tui_gateway" / "prompt_turn.py"):
         b = f.with_suffix(f.suffix + ".hdr-backup")
         if b.exists():
@@ -420,6 +500,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--uninstall", action="store_true")
     ap.add_argument("--no-autostart", action="store_true")
+    ap.add_argument("--repair", action="store_true",
+                    help="re-apply modules + patches only (no prompts); exit 1 if any is still missing")
     ap.add_argument("--channel", action="append", default=[],
                     metavar="ID=FOLDER", help="e.g. --channel 123456=D:/code/proj")
     args = ap.parse_args()
@@ -437,6 +519,10 @@ def main() -> None:
         if rp.exists():
             rp.unlink()
             print("  removed discord_router.py")
+        ms = home / "model_sync.py"
+        if ms.exists():
+            ms.unlink()
+            print("  removed model_sync.py")
         print("\nDone. Restart the gateway: hermes gateway restart")
         return
 
@@ -449,6 +535,16 @@ def main() -> None:
     apply_mirror_patches(home)
     apply_history_resync(home)
     apply_desktop_live_refresh(home)
+    apply_model_sync(home)
+
+    if args.repair:
+        # Non-interactive re-apply (the supervisor runs this after `hermes update`).
+        missing = missing_patches(home)
+        if missing:
+            print("\nStill missing:", ", ".join(missing))
+            sys.exit(1)
+        print("\nRepaired. Restart the gateway and reopen Desktop to load the patches.")
+        return
 
     channels = []
     for spec in args.channel:
