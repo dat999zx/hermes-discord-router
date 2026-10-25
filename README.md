@@ -19,6 +19,8 @@ per-session threads, so both surfaces show the same work.
 | **Channel routing** | A message in `#channel` runs in that channel's project folder |
 | **Desktop mirror** | Prompts typed in Hermes Desktop appear in the mapped channel as a thread |
 | **Lifecycle supervisor** | Gateway + mirror start when you open Hermes Desktop, stop when you close it |
+| **Model sync** | A `/model` switch in Desktop reaches the same session's Discord thread, and the other way round |
+| **Self-repair** | Re-applies the gateway patches by itself after a `hermes update` wipes them |
 
 Hermes already handles Discord→Hermes messaging. This adds the *project routing*
 and the *Desktop→Discord* direction.
@@ -106,6 +108,15 @@ Origin is decided **per message**, not per session: a session's `source` stays
 nothing. Messages relayed from Discord (marked by a platform message ID or the
 gateway's `[Name] ` prefix) are skipped, which is also what prevents echo loops.
 
+**Model sync.** A Discord thread opened in Desktop is one session driven by two
+processes, and Hermes keeps each one's `/model` choice to itself. `model_sync.py`
+is called at the start of every turn on both sides. A Desktop switch is stored
+as a marker message, and the gateway adopts the newest one once as the session's
+`/model` override, so a later Discord `/model` still wins. A gateway `/model`
+writes the route to both the top-level `model_config` keys and `gateway_runtime`,
+and Desktop applies it as a session-only switch. Each switch goes through
+Hermes's own switch path, so the other side sees its own value and does nothing.
+
 **Supervisor.** Polls for the Hermes Desktop process and starts/stops both
 services with it. Shutdown is debounced ~9s so an app restart doesn't thrash the
 gateway; a service that dies while the app is open is restarted automatically.
@@ -117,8 +128,13 @@ plugin/hook system fires after that point and can't modify session context, so
 there is no plugin-only path. The patches are two small anchored inserts, backed
 up and reversible.
 
-**A Hermes update overwrites them.** Re-run `python install.py` afterwards — it
-detects what is already applied and only fixes what is missing.
+**A Hermes update overwrites them.** The supervisor notices within a minute
+(immediately when the update marker clears), runs `python install.py --repair`
+and restarts a running gateway so it loads the patches. Desktop picks its patch
+up the next time it is reopened. If Hermes moved the code a patch anchors to,
+the repair is attempted once and the reason is logged to
+`logs/desktop_supervisor.log`. You can still run `python install.py --repair`
+(or plain `python install.py`) by hand any time.
 
 ## Troubleshooting
 
@@ -171,7 +187,8 @@ schemas without `message_uid` retain the original row-based behavior.
 | `install.py` | Installer / uninstaller |
 | `discord_router.py` | Channel → folder resolution (copied into Hermes home) |
 | `desktop_mirror.py` | Desktop → Discord mirror service |
-| `desktop_supervisor.py` | Starts/stops services with Hermes Desktop |
+| `desktop_supervisor.py` | Starts/stops services with Hermes Desktop; re-applies patches after updates |
+| `model_sync.py` | One model per session across Desktop and Discord (copied into Hermes home) |
 
 ## License
 
