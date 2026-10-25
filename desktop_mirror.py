@@ -56,6 +56,53 @@ DESKTOP_SOURCES = {"", "tui", "desktop", "webui", "local", "cli"}
 # Discord, don't mirror it back".
 _RELAYED_PREFIX_RE = re.compile(r"^\s*\[[^\]\n]{1,64}\]\s")
 
+# Discord renders no horizontal rule, so a run of box-drawing characters
+# stands in for one between exchanges.
+_DIVIDER = "━" * 22
+_USER_HEADER = "### 🗣️ You"
+_ASSISTANT_HEADER = "### 🦆 Hermes"
+# Discord strips leading blank lines from a message, and consecutive messages
+# from one bot stack with no gap. A zero-width-space line survives the strip
+# and gives the reply visible breathing room under the prompt.
+_SPACER = "\u200b"
+
+
+def format_turn(role: str, content: str, after: Optional[str] = None) -> str:
+    """Lay out one mirrored turn so exchanges read as separate blocks.
+
+    A prompt opens with a divider and header, its body left as plain text
+    (a quote bar greys it out and makes it hard to read). A reply opens with
+    a spacer line and header, but only when it follows something other than a
+    reply, so a run of interim assistant messages reads as one answer.
+    ``after`` is the role of the previous turn mirrored into the same thread.
+    """
+    content = (content or "").strip("\n")
+    if role == "user":
+        return f"{_DIVIDER}\n{_USER_HEADER}\n{content}"
+    if after == "assistant":
+        return content
+    return f"{_SPACER}\n{_ASSISTANT_HEADER}\n{content}"
+
+
+def unformat_turn(text: str) -> str:
+    """Recover a turn's raw content from a posted message (for dedupe)."""
+    text = text or ""
+    if text.startswith("**You:** "):  # pre-format_turn posts
+        return text[len("**You:** "):]
+    lines = text.split("\n")
+    if lines and lines[0] == _SPACER:
+        lines = lines[1:]
+    if lines and lines[0] == _DIVIDER:
+        lines = lines[1:]
+    if lines and lines[0] == _USER_HEADER:
+        body = lines[1:]
+        if body and all(l.startswith(">") for l in body):  # quoted-layout posts
+            body = [l[2:] if l.startswith("> ") else l[1:] for l in body]
+        return "\n".join(body)
+    if lines and lines[0] == _ASSISTANT_HEADER:
+        lines = lines[1:]
+    return "\n".join(lines)
+
 def _sql_placeholders(values) -> str:
     return ",".join("?" * len(values))
 
@@ -831,8 +878,9 @@ class Mirror:
                         self.discord_turn_threads.discard(thread_id)
                     elif thread_id in self.discord_turn_threads:
                         continue  # gateway already posted this reply
-                    prefix = "**You:** " if role == "user" else ""
-                    self._send(thread_id, f"{prefix}{content}")
+                    last_roles = self.__dict__.setdefault("_last_role", {})
+                    self._send(thread_id, format_turn(role, content, last_roles.get(thread_id)))
+                    last_roles[thread_id] = role
                     log.info("mirrored %s turn (msg %s) session %s -> thread %s",
                              role, t["id"], sid, thread_id)
                 if turns:

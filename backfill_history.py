@@ -18,7 +18,7 @@ def existing_texts(tid):
         r = m.http.get(f"{dm.DISCORD_API}/channels/{tid}/messages", params={"limit": 100, **({"before": before} if before else {})}, timeout=30)
         if not r.ok: return seen
         page = r.json()
-        for x in page: seen.add(re.sub(r"^\*\*You:\*\* ", "", x["content"])[:80])
+        for x in page: seen.add(dm.unformat_turn(x["content"])[:80])
         if len(page) < 100: return seen
         before = page[-1]["id"]
 
@@ -50,7 +50,9 @@ for s in sessions:
     if apply and todo:
         tid = tid or m._ensure_thread(ch, s["id"], next((c for ro, c in todo if ro == "user"), todo[0][1]))
         if not tid: print("  no thread, skipped"); continue
+        prev = None
         for ro, c in todo:
-            m._send(tid, ("**You:** " if ro == "user" else "") + c)
+            m._send(tid, dm.format_turn(ro, c, prev))
+            prev = ro
             time.sleep(0.4)
 print(("posted" if apply else "would post"), total, "turns")

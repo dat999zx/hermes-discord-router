@@ -57,11 +57,13 @@ def check(with_uid=True, role="user"):
                 m.run()
             except StopPolling:
                 pass
-        expected = ["**You:** already delivered", "**You:** no uid", "**You:** not consumed yet"]
+        raw = ["already delivered", "no uid", "not consumed yet"]
         if not with_uid:
-            expected.insert(0, "**You:** already delivered")
-        if role == "assistant":
-            expected = [text.removeprefix("**You:** ") for text in expected]
+            raw.insert(0, "already delivered")
+        expected, prev = [], None
+        for text in raw:
+            expected.append(dm.format_turn(role, text, prev))
+            prev = role
         assert sent == expected, (sent, expected)
         assert json.loads(m.cursor_path.read_text())["last_id"] == 6
         # A restart must not replay the rows just consumed.
