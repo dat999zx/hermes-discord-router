@@ -31,6 +31,8 @@ def check():
             ('assistant', 'Desktop reply', None),
             ('user', '[Person] relayed without id', None),
             ('assistant', 'already delivered', None),
+            ('user', '[Triggering message id: `1563047539773808651`] relayed', '1563047539773808651'),
+            ('assistant', 'already delivered trigger reply', None),
             ('user', 'legacy Desktop prompt', None),
             ('assistant', 'legacy reply', None),
         ]

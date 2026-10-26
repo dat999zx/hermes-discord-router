@@ -30,6 +30,20 @@ if not exist "%REPO%\install.py" (
 )
 
 cd /d "%REPO%"
+if errorlevel 1 goto :fail
+
+echo Updating the router from GitHub...
+git pull --ff-only origin main
+if errorlevel 1 (
+    echo [X] Could not update the router. Resolve local changes or network errors first.
+    goto :fail
+)
+echo Checking Desktop and Discord message detection...
+"%PY%" test_local_origin.py
+if errorlevel 1 goto :fail
+REM --check updates and checks only; it never interrupts an active gateway.
+if /i "%~1"=="--check" exit /b 0
+
 "%PY%" install.py
 if errorlevel 1 (
     echo.
@@ -42,12 +56,14 @@ if errorlevel 1 (
 echo.
 echo Restarting the gateway (stop + start, not restart: a plain restart
 echo inherits a stale DISCORD_CHANNEL_PROJECTS from the old process)...
-hermes gateway stop
+call hermes gateway stop
+if errorlevel 1 goto :fail
 REM `ping` as the sleep: timeout.exe refuses redirected stdin ("Input redirection
 REM is not supported"), and git-bash on PATH shadows both `timeout` and `sleep`
 REM with POSIX versions that reject /t.
 ping -n 5 127.0.0.1 >nul
-echo N | hermes gateway start
+echo N | call hermes gateway start
+if errorlevel 1 goto :fail
 ping -n 15 127.0.0.1 >nul
 
 REM `hermes gateway start` re-adds Hermes's OWN login item, which would start a
