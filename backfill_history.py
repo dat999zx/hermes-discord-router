@@ -37,7 +37,7 @@ for s in sessions:
         c = r["content"]
         if c.lstrip().startswith(dm._NOISE_PREFIXES): continue
         if r["role"] == "user":
-            discord_turn = bool(r["platform_message_id"]) or bool(dm._RELAYED_PREFIX_RE.match(c))
+            discord_turn = dm.is_discord_turn(dict(r))
             if discord_turn: continue
         elif discord_turn: continue  # gateway already delivered this reply
         out.append((r["role"], c))

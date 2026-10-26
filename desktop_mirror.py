@@ -56,6 +56,7 @@ DESKTOP_SOURCES = {"", "tui", "desktop", "webui", "local", "cli"}
 # Discord, don't mirror it back".
 _RELAYED_PREFIX_RE = re.compile(r"^\s*\[[^\]\n]{1,64}\]\s")
 
+
 # Discord renders no horizontal rule, so a run of box-drawing characters
 # stands in for one between exchanges.
 _DIVIDER = "━" * 22
@@ -102,6 +103,15 @@ def unformat_turn(text: str) -> str:
     if lines and lines[0] == _ASSISTANT_HEADER:
         lines = lines[1:]
     return "\n".join(lines)
+
+
+def is_discord_turn(turn: dict) -> bool:
+    """Discord IDs are decimal snowflakes; local transport IDs are UUID hex."""
+    return turn.get("role") == "user" and (
+        bool(re.fullmatch(r"[0-9]{17,20}", str(turn.get("platform_message_id") or "")))
+        or bool(_RELAYED_PREFIX_RE.match(turn.get("content") or ""))
+    )
+
 
 def _sql_placeholders(values) -> str:
     return ",".join("?" * len(values))
@@ -821,21 +831,11 @@ class Mirror:
                     content = t["content"] or ""
                     source = (t.get("source") or "").strip().lower()
 
-                    # Decide whether THIS user turn arrived over Discord.
-                    # Two signals, because neither alone is reliable:
-                    #  * platform_message_id -- set for most relayed messages
-                    #  * "[Name] ..." prefix -- the gateway stamps relayed text
-                    #    with the sender's display name (shared/multi-user
-                    #    sessions), and some relayed rows carry no platform id.
-                    # Decided BEFORE the noise drop: relayed rows start with
-                    # "[Triggering message id:" -- itself a noise prefix -- so
-                    # dropping noise first swallowed exactly the row that arms
-                    # the echo guard, and every gateway-delivered reply was
-                    # mirrored a second time.
-                    from_discord = role == "user" and (
-                        bool(t.get("platform_message_id"))
-                        or bool(_RELAYED_PREFIX_RE.match(content))
-                    )
+
+                    # Local gateway requests also have platform_message_id, but
+                    # use UUID hex rather than Discord's decimal snowflakes.
+                    from_discord = is_discord_turn(t)
+
 
                     # Drop gateway/system noise -- unless it is a relayed
                     # Discord prompt, which must still reach the guard below.
